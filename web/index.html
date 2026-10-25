@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <title>Apple Pickup Monitor</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <svg class="svg-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-bag" viewBox="0 0 24 24"><path d="M5 7h14l1 14H4L5 7Z"/><path d="M8 8V6a4 4 0 0 1 8 0v2"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z"/><path d="M10 21h4"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><path d="M8 3v6M16 9v6M10 15v6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 4 12 8-12 8V4Z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 6-8 11-8 11S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 6a8 8 0 0 1 13 3M5 15a8 8 0 0 0 13 3"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.01"/></symbol>
+    <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10M6 5a9 9 0 1 0 12 0"/></symbol>
+  </svg>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Main navigation">
+      <a class="brand" href="#watchlist" aria-label="Pickup Monitor home">
+        <span class="brand-mark"><svg class="icon"><use href="#i-bag"/></svg></span>
+        <span>Pickup<span class="brand-second">Monitor</span></span>
+      </a>
+      <div class="sidebar-label">YOUR WORKSPACE</div>
+      <nav>
+        <a class="nav-item active" href="#watchlist"><svg class="icon"><use href="#i-grid"/></svg>Monitoring list<span id="nav-count" class="nav-count">0</span></a>
+        <a class="nav-item" href="#notifications"><svg class="icon"><use href="#i-bell"/></svg>Notifications</a>
+        <button class="nav-item" type="button" data-open-settings><svg class="icon"><use href="#i-settings"/></svg>Settings</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-card"><span class="local-dot"></span><div>Runs on your Mac<small>Your monitoring list stays local</small></div></div>
+        <div class="sidebar-meta"><span>Australia</span><span id="app-version">Prototype</span></div>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar"><span class="breadcrumb">Workspace <span>/</span> Monitoring list</span><span class="region-badge"><svg class="icon"><use href="#i-pin"/></svg>Australia</span></header>
+      <div class="page-content">
+        <section class="page-heading" id="watchlist" aria-labelledby="page-title">
+          <div><div class="eyebrow">APPLE STORE PICKUP</div><h1 id="page-title">A little closer to yours.</h1><p>Monitor the products you want. Know when they’re ready for pickup.</p></div>
+          <button class="button primary" type="button" data-open-add><svg class="icon"><use href="#i-plus"/></svg>Add monitoring targets</button>
+        </section>
+
+        <div id="connection-banner" class="notice warning" role="status" hidden></div>
+        <div id="health-banner" class="notice warning" role="status" hidden></div>
+
+        <section class="summary-grid" aria-label="Monitoring overview">
+          <article class="summary-card"><span class="summary-label">Monitoring targets</span><div class="summary-value"><strong id="watch-count">—</strong><span class="summary-icon"><svg class="icon"><use href="#i-bag"/></svg></span></div><small id="watch-detail">Products and stores you’re following</small></article>
+          <article class="summary-card"><span class="summary-label">Available for pickup</span><div class="summary-value"><strong id="available-count">—</strong><span class="summary-icon green"><svg class="icon"><use href="#i-check"/></svg></span></div><small id="available-detail">Waiting for your first check</small></article>
+          <article class="summary-card"><span class="summary-label">Next check</span><div class="summary-value"><strong id="next-check">—</strong><span class="summary-icon"><svg class="icon"><use href="#i-clock"/></svg></span></div><small id="next-check-detail">Monitoring is paused</small></article>
+        </section>
+
+        <section class="panel watch-panel" aria-labelledby="watchlist-title">
+          <div class="panel-heading"><div class="panel-title-row"><h2 id="watchlist-title">Your monitoring list</h2><span id="monitor-status" class="status-pill neutral"><span class="status-dot"></span>Connecting</span></div><button class="button secondary compact" id="monitor-toggle" type="button" disabled><svg class="icon"><use href="#i-play"/></svg><span>Start monitoring</span></button></div>
+          <div id="watch-empty" class="empty-state"><div class="empty-illustration"><svg class="icon"><use href="#i-bag"/></svg><span class="illustration-spark">+</span></div><h3>Something on your wish list?</h3><p>Choose a product and your nearby Apple Stores.<br>We’ll keep an eye on pickup availability for you.</p><button class="button primary" type="button" data-open-add>Add your first monitoring target<svg class="icon"><use href="#i-arrow"/></svg></button><span class="empty-note">iPhone · iPad · Mac · Apple Watch</span></div>
+          <div id="watch-table-wrap" class="table-scroll" hidden><table class="watch-table"><thead><tr><th scope="col">Product</th><th scope="col">Apple Store</th><th scope="col">Availability</th><th scope="col">Last checked</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="watch-rows"></tbody></table></div>
+          <div class="panel-footnote"><svg class="icon"><use href="#i-info"/></svg><span>Availability can change quickly. Complete your purchase on Apple’s website.</span><a href="https://www.apple.com/au/shop" target="_blank" rel="noopener noreferrer">Visit Apple<svg class="icon"><use href="#i-arrow"/></svg></a></div>
+        </section>
+
+        <section class="panel notification-panel" id="notifications" aria-labelledby="notifications-title"><div class="panel-heading"><div><h2 id="notifications-title">Recent notifications</h2><p class="panel-subtitle">Updates from your monitoring list, in one place.</p></div><button class="text-button" type="button" data-open-settings>Manage alerts<svg class="icon"><use href="#i-arrow"/></svg></button></div><div id="notification-empty" class="notification-empty"><span class="notification-empty-icon"><svg class="icon"><use href="#i-bell"/></svg></span><div><h3>No notifications yet</h3><p id="notification-empty-text">Connect Pushover or Bark in Settings to get pickup alerts.</p></div></div><ol id="notification-list" class="notification-list" hidden></ol></section>
+
+        <footer class="page-footer"><span><span class="footer-dot"></span>Local monitoring. No Apple account required.</span><span>Keep your Mac awake and connected.<button id="quit-button" type="button">Quit service</button></span></footer>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="add-dialog" class="dialog add-dialog" aria-labelledby="add-title"><form id="add-form"><div class="dialog-heading"><div><div class="eyebrow">MAKE IT YOURS</div><h2 id="add-title">Add monitoring targets</h2><p>Choose products and the Apple Stores you’d visit.</p></div><button class="icon-button" type="button" data-close-dialog aria-label="Close add monitoring target dialog"><svg class="icon"><use href="#i-close"/></svg></button></div><div id="add-error" class="notice warning dialog-notice" role="alert" hidden></div><div class="selection-columns"><section class="selection-pane" aria-labelledby="products-title"><div class="selection-heading"><h3 id="products-title"><span class="step-number">1</span>Pick your products</h3><span id="product-selected" class="selection-count">0 selected</span></div><div class="category-tabs" role="group" aria-label="Product category"><button class="category-tab selected" type="button" data-category="iphone" aria-pressed="true">iPhone</button><button class="category-tab" type="button" data-category="ipad" aria-pressed="false">iPad</button><button class="category-tab" type="button" data-category="mac" aria-pressed="false">Mac</button><button class="category-tab" type="button" data-category="watch" aria-pressed="false">Apple Watch</button></div><label class="search-field"><svg class="icon"><use href="#i-search"/></svg><span class="sr-only">Search products by model, capacity, colour or part number</span><input id="product-search" type="search" placeholder="Model, capacity or colour…" autocomplete="off"></label><div id="product-options" class="option-list product-options" aria-label="Available products"><p class="list-message">Loading products…</p></div><div class="list-footer"><span id="product-match-count"></span><button id="refresh-catalog" class="text-button" type="button"><svg class="icon"><use href="#i-refresh"/></svg>Refresh catalog</button></div></section><section class="selection-pane" aria-labelledby="stores-title"><div class="selection-heading"><h3 id="stores-title"><span class="step-number">2</span>Choose your stores</h3><span id="store-selected" class="selection-count">0 selected</span></div><div class="store-region"><svg class="icon"><use href="#i-pin"/></svg>Apple Stores in Australia</div><label class="search-field"><svg class="icon"><use href="#i-search"/></svg><span class="sr-only">Search stores by city or name</span><input id="store-search" type="search" placeholder="City or store name…" autocomplete="off"></label><div id="store-options" class="option-list store-options" aria-label="Available stores"><p class="list-message">Loading stores…</p></div><div class="list-footer"><span id="store-match-count"></span><button id="clear-selection" class="text-button" type="button">Clear selections</button></div></section></div><div class="dialog-footer"><p id="selection-summary">Select at least one product and one store.</p><div class="button-group"><button class="button secondary" type="button" data-close-dialog>Cancel</button><button id="add-submit" class="button primary" type="submit" disabled><svg class="icon"><use href="#i-plus"/></svg>Add monitoring targets</button></div></div></form></dialog>
+
+  <dialog id="settings-dialog" class="dialog settings-dialog" aria-labelledby="settings-title"><form id="settings-form"><div class="dialog-heading"><div><div class="eyebrow">YOUR PREFERENCES</div><h2 id="settings-title">Monitoring & alerts</h2><p>Set the pace and choose how you hear from us.</p></div><button class="icon-button" type="button" data-close-dialog aria-label="Close settings"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="settings-body"><div id="settings-message" class="notice dialog-notice" role="status" hidden></div><section class="settings-section"><div class="setting-label-row"><div><h3>Check interval</h3><p>Apple’s rate limits may extend the time between checks.</p></div><label class="interval-field"><span class="sr-only">Check interval in seconds</span><input id="interval-input" type="number" min="60" max="3600" step="1" value="60" required><span>seconds</span></label></div></section><section class="settings-section"><div class="setting-label-row"><div><h3>Pushover <span id="pushover-configured" class="configured-label"></span></h3><p>Send pickup alerts to your phone or desktop.</p></div><label class="switch"><input id="pushover-enabled" type="checkbox" aria-label="Enable Pushover notifications"><span></span></label></div><div class="field-grid"><label class="input-label">Application API token<input id="pushover-token" type="password" autocomplete="new-password" spellcheck="false" placeholder="Your application token"></label><label class="input-label">User key<input id="pushover-user" type="password" autocomplete="new-password" spellcheck="false" placeholder="Your Pushover user key"></label></div><div class="provider-footer"><a href="https://pushover.net/" target="_blank" rel="noopener noreferrer">Get your Pushover keys<svg class="icon"><use href="#i-arrow"/></svg></a><button class="button secondary compact" type="button" data-test-channel="pushover">Send test</button></div></section><section class="settings-section"><div class="setting-label-row"><div><h3>Bark <span id="bark-configured" class="configured-label"></span></h3><p>Send pickup alerts to your iPhone.</p></div><label class="switch"><input id="bark-enabled" type="checkbox" aria-label="Enable Bark notifications"><span></span></label></div><label class="input-label">Push URL<input id="bark-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="https://api.day.app/your-key"></label><div class="provider-footer"><span>Credentials are saved securely on this Mac.</span><button class="button secondary compact" type="button" data-test-channel="bark">Send test</button></div></section><div class="settings-note"><svg class="icon"><use href="#i-info"/></svg><p>Alerts are sent when pickup becomes available. Continuous availability doesn’t send an alert every cycle. Save changes before sending a test.</p></div></div><div class="dialog-footer"><span class="muted">Blank key fields keep your saved credentials.</span><div class="button-group"><button class="button secondary" type="button" data-close-dialog>Cancel</button><button id="settings-submit" class="button primary" type="submit">Save changes</button></div></div></form></dialog>
+
+  <dialog id="quit-dialog" class="dialog small-dialog" aria-labelledby="quit-title"><div class="dialog-heading"><div><h2 id="quit-title">Quit Pickup Monitor?</h2><p>Availability checks and notifications will stop.<br>Your monitoring list will be saved for next time.</p></div></div><div class="dialog-footer"><button class="button secondary" type="button" data-close-dialog>Keep monitoring</button><button id="confirm-quit" class="button danger" type="button">Quit service</button></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

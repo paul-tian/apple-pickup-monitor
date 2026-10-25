@@ -1,0 +1,32 @@
+[package]
+name = "apple-pickup-monitor"
+version = "0.4.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "A native macOS Apple pickup monitor with a bundled private monitoring engine"
+default-run = "apple-pickup-monitor"
+
+[dependencies]
+apw-core = { git = "https://github.com/ENCHIGO/apple-pickup-watcher.git", rev = "842818f04828b792ce2d6a01c78847fe0e14766a", default-features = false, features = ["chrome-tls"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync", "io-std", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "brotli"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+fs2 = "0.4"
+dirs = "6"
+tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3"
+http-body-util = "0.1"
+
+[profile.release]
+strip = true
+lto = "thin"
+opt-level = "s"
