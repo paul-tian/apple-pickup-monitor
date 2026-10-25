@@ -5,14 +5,15 @@ pickup_resolve_rust_toolchain() {
   local project_root="$1" cargo_dir compiler
   if [[ -n "${APPLE_PICKUP_CARGO:-}" ]]; then
     PICKUP_CARGO="$APPLE_PICKUP_CARGO"
-  elif command -v cargo >/dev/null 2>&1; then
-    PICKUP_CARGO="$(command -v cargo)"
   elif [[ -x "$project_root/.tools/cargo/bin/cargo" ]]; then
     PICKUP_CARGO="$project_root/.tools/cargo/bin/cargo"
-    export CARGO_HOME="${CARGO_HOME:-$project_root/.tools/cargo}"
-    export RUSTUP_HOME="${RUSTUP_HOME:-$project_root/.tools/rustup}"
+  elif command -v cargo >/dev/null 2>&1; then
+    PICKUP_CARGO="$(command -v cargo)"
+  elif [[ -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]]; then
+    # Xcode launched from Finder does not inherit a shell's PATH.
+    PICKUP_CARGO="${CARGO_HOME:-$HOME/.cargo}/bin/cargo"
   else
-    printf '%s\n' 'Rust Cargo was not found. Install Rust, use the project .tools/ toolchain, or set APPLE_PICKUP_CARGO.' >&2
+    printf 'Rust Cargo was not found. Run %q once, then build again.\n' "$project_root/scripts/setup-build-tools.sh" >&2
     return 1
   fi
 
@@ -25,6 +26,14 @@ pickup_resolve_rust_toolchain() {
   fi
   cargo_dir="$(cd "$(dirname "$PICKUP_CARGO")" && pwd)"
   PICKUP_CARGO="$cargo_dir/$(basename "$PICKUP_CARGO")"
+  if [[ -d "$project_root/.tools/cargo/bin" && "$cargo_dir" == "$(cd "$project_root/.tools/cargo/bin" && pwd)" ]]; then
+    # A repo-local rustup proxy must never use unrelated inherited homes.
+    export CARGO_HOME="$project_root/.tools/cargo"
+    export RUSTUP_HOME="$project_root/.tools/rustup"
+    # Missing compilers belong to explicit setup, not an implicit Xcode download.
+    export RUSTUP_AUTO_INSTALL=0
+  fi
+  export PATH="$cargo_dir:$PATH"
 
   # Explicit compiler selection wins. Otherwise pair Cargo with the compiler
   # installed beside it; this also handles project-local rustup proxies.
@@ -47,6 +56,44 @@ pickup_resolve_rust_toolchain() {
   if [[ -x "$cargo_dir/rustup" ]]; then PICKUP_RUSTUP="$cargo_dir/rustup"
   elif command -v rustup >/dev/null 2>&1; then PICKUP_RUSTUP="$(command -v rustup)"
   fi
+}
+
+pickup_resolve_cmake() {
+  local project_root="$1" executable version major minor
+  if [[ -n "${CMAKE:-}" ]]; then
+    executable="$CMAKE"
+  elif [[ -x "$project_root/.tools/cmake/CMake.app/Contents/bin/cmake" ]]; then
+    executable="$project_root/.tools/cmake/CMake.app/Contents/bin/cmake"
+  elif command -v cmake >/dev/null 2>&1; then
+    executable="$(command -v cmake)"
+  elif [[ -x /Applications/CMake.app/Contents/bin/cmake ]]; then
+    executable=/Applications/CMake.app/Contents/bin/cmake
+  else
+    printf 'CMake was not found. Run %q once, then build again.\n' "$project_root/scripts/setup-build-tools.sh" >&2
+    return 1
+  fi
+  if [[ "$executable" != */* ]]; then
+    executable="$(command -v "$executable")" || {
+      printf 'CMAKE does not name an available executable. Run %q or set CMAKE to its full path.\n' "$project_root/scripts/setup-build-tools.sh" >&2
+      return 1
+    }
+  fi
+  if [[ ! -x "$executable" ]]; then
+    printf 'CMake is not executable: %s. Run %q once.\n' "$executable" "$project_root/scripts/setup-build-tools.sh" >&2
+    return 1
+  fi
+  executable="$(cd "$(dirname "$executable")" && pwd)/$(basename "$executable")"
+  if ! version="$("$executable" --version)" || [[ ! "$version" =~ ^cmake[[:space:]]version[[:space:]]([0-9]+)\.([0-9]+) ]]; then
+    printf 'Could not determine the CMake version at %s. Run %q once.\n' "$executable" "$project_root/scripts/setup-build-tools.sh" >&2
+    return 1
+  fi
+  major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"
+  if (( major < 3 || (major == 3 && minor < 22) )); then
+    printf 'CMake 3.22 or newer is required; found %s.%s. Run %q once.\n' "$major" "$minor" "$project_root/scripts/setup-build-tools.sh" >&2
+    return 1
+  fi
+  export CMAKE="$executable"
+  export PATH="$(dirname "$CMAKE"):$PATH"
 }
 
 pickup_print_target_setup() {

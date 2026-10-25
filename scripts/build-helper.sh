@@ -6,8 +6,7 @@ cd "$PROJECT_ROOT"
 : "${TARGET_BUILD_DIR:?Run this script from the Xcode build phase}"
 : "${CONTENTS_FOLDER_PATH:?Xcode did not supply the app bundle location}"
 
-# Xcode GUI launches do not inherit a shell's Homebrew PATH.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# The shared resolver finds repo-local tools even in Xcode's minimal PATH.
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 BUILD_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
 if [[ "$BUILD_ROOT" != /* ]]; then BUILD_ROOT="$PROJECT_ROOT/$BUILD_ROOT"; fi
@@ -28,6 +27,7 @@ for architecture in $BUILD_ARCHS; do
 done
 # Check the whole architecture set before compiling even the first helper.
 pickup_require_rust_targets "$PROJECT_ROOT" "${RUST_TARGETS[@]}"
+pickup_resolve_cmake "$PROJECT_ROOT"
 BINARIES=()
 for rust_target in "${RUST_TARGETS[@]}"; do
   "$PICKUP_CARGO" build --release --locked --bin apple-pickup-monitor --target "$rust_target"

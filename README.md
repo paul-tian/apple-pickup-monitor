@@ -35,21 +35,28 @@ Australia and the United States have been tested against the live Apple endpoint
 
 ## Build and run in Xcode
 
-Building requires Xcode with the macOS SDK, Rust 1.98 or newer, and CMake. The native target uses Xcode's recommended minimum macOS version, currently macOS 14. The Rust transport needs a C/Clang toolchain during compilation; these tools are not runtime requirements for the finished app.
+Start with a Mac, Xcode (including its first-launch components), and internet access. No Homebrew or existing Rust/CMake installation is required. The native target uses Xcode's recommended minimum macOS version, currently macOS 14.
 
-Install both macOS Rust standard-library targets once before a universal Release or Archive build:
+After cloning, run this once from the repository folder:
 
 ```sh
-./scripts/setup-rust-targets.sh
+./scripts/setup-build-tools.sh
 ```
 
-This installs `aarch64-apple-darwin` (Apple Silicon) and `x86_64-apple-darwin` (Intel) into the same Rust toolchain used by the helper build. It uses the project-local `.tools/` installation when Cargo is not on `PATH`; it does not change shell profiles. To install only Intel support, pass `x86_64-apple-darwin`. The Xcode build checks every requested target before compiling and prints the matching setup command if one is missing. It never downloads target libraries automatically during a build.
+The script installs Rust 1.99.1 (managed by rustup 1.29.2) and CMake 4.4.4 inside the ignored `.tools/` directory. Rust includes both `aarch64-apple-darwin` and `x86_64-apple-darwin` standard libraries, plus rustfmt and Clippy for the development checks. CMake's official universal binary supports Apple Silicon and Intel. Xcode supplies the C/Clang compiler used to build the helper's TLS dependency.
+
+Installer/archive versions and SHA-256 hashes are pinned in `scripts/build-tools.env`. Downloads come from [Rust's official distribution server](https://rust-lang.github.io/rustup/installation/other.html) and [Kitware's CMake releases](https://cmake.org/download/); the script checks those hashes before executing or extracting them, and rustup checks its component downloads. Re-running setup reuses completed installations and repairs missing components. A failed download can be retried by running the same command.
+
+Setup requires no administrator privileges, changes no shell profiles or system settings, and does not install into `/Applications` or your global Cargo/Rustup directories. Everything it installs or caches stays under `.tools/cargo`, `.tools/rustup`, `.tools/cmake`, and `.tools/downloads`. Xcode finds these tools automatically; there is no need to source an environment file or restart your shell. The tools are not copied into the finished app.
 
 1. Open `ApplePickupMonitor.xcodeproj`.
 2. Select the **Apple Pickup Monitor** scheme and **My Mac**.
-3. Build and run.
+3. Select your development team in Signing settings, or **Sign to Run Locally** for an ad-hoc build.
+4. Build and run. The first build downloads the pinned upstream core and Cargo dependencies.
 
-The project's **Build and embed monitoring helper** phase compiles the pinned Rust core and places the executable inside the app bundle. Cargo selection is `APPLE_PICKUP_CARGO` when set, then Cargo on `PATH`, then the project-local `.tools/cargo/bin/cargo` and `.tools/rustup` installation. An explicit `RUSTC` (or `CARGO_BUILD_RUSTC`) is respected; otherwise the scripts pair Cargo with the compiler installed beside it, falling back to `rustc` on `PATH`. Custom non-rustup compilers need their target libraries installed through that compiler's distribution. Xcode's helper/setup scripts also include standard Apple Silicon and Intel Homebrew paths when looking for build tools. No developer-specific helper path is used at runtime.
+The project's **Build and embed monitoring helper** phase compiles the pinned Rust core and places the executable inside the app bundle. It checks requested Rust targets and CMake before compilation; missing build tools produce setup instructions instead of installing tools during an Xcode build.
+
+For developers using their own tools, Cargo selection is `APPLE_PICKUP_CARGO` when set, then the project-local installation, then Cargo on `PATH` or in the standard Cargo home (normally `~/.cargo/bin`). An explicit `RUSTC` (or `CARGO_BUILD_RUSTC`) is respected; otherwise Cargo is paired with the compiler installed beside it. CMake selection is an explicit `CMAKE` path, then `.tools/cmake/CMake.app/Contents/bin/cmake`, then an existing installation on `PATH` or in `/Applications/CMake.app`. A custom toolchain needs Rust 1.98+ and CMake 3.22+. `./scripts/setup-rust-targets.sh` can install both macOS targets into an existing rustup-managed toolchain; it never installs into a different toolchain's home. No developer-specific helper path is used at runtime.
 
 For a packaged local build:
 
@@ -57,7 +64,7 @@ For a packaged local build:
 ./scripts/build-app.sh
 ```
 
-The result is `dist/Apple Pickup Monitor.app`. The script uses `xcodebuild`, embeds the helper, checks runtime library paths, and preserves Xcode's signatures. It honors the project's signing settings unless `SIGNING_IDENTITY` is supplied. The default packaged build matches the current Mac. For an Intel build on Apple Silicon, first run `./scripts/setup-rust-targets.sh x86_64-apple-darwin`, then set `APPLE_PICKUP_TARGET=x86_64-apple-darwin`. Xcode Release/Archive can request both architectures; the helper phase builds each requested target and combines them with `lipo`. Cross-architecture builds need separate validation before release.
+The result is `dist/Apple Pickup Monitor.app`. The script uses `xcodebuild`, embeds the helper, checks runtime library paths, and preserves Xcode's signatures. It honors the project's signing settings unless `SIGNING_IDENTITY` is supplied. The default packaged build matches the current Mac. For an Intel build on Apple Silicon, set `APPLE_PICKUP_TARGET=x86_64-apple-darwin`; the setup script already installs its Rust target. Xcode Release/Archive can request both architectures; the helper phase builds each requested target and combines them with `lipo`. Cross-architecture builds need separate validation before release.
 
 The Xcode target uses Apple Development signing for local builds. Select your development team in Signing settings. The helper uses the fixed signing identifier `com.paultian.apple-pickup-monitor.engine` so certificate-signed rebuilds retain its Keychain identity. `SIGNING_IDENTITY=- ./scripts/build-app.sh` explicitly creates an ad-hoc build when no signing certificate is available, but rebuilt ad-hoc helpers can prompt again for Keychain access. Switching from an older build or between development and Developer ID signing may require one new authorization for existing credentials. Use the release script below for Developer ID distribution. User script sandboxing is disabled specifically so Cargo can compile and package the helper in its build phase; App Sandbox is not enabled.
 
@@ -91,6 +98,7 @@ A timeout after a provider accepts a message can still cause a duplicate on retr
 ./scripts/test-native-transport.sh
 ./scripts/test-engine-lifecycle.sh
 python3 scripts/tests/test_rust_toolchain.py
+python3 scripts/tests/test_build_tools_setup.py
 ```
 
 The native v0.4.0 build preserves the existing 16-target Australian database. Xcode build, 48 Rust tests, native model/localization tests, private-pipe transport tests, notification draft tests, automatic-recovery lifecycle tests, and bundle signature verification pass. Notification tests cover testing before saving, blank-field fallback, provider isolation, and preserving saved credentials after failures. A live check completed all 16 targets without a TCP listener or session file; Quit released the engine's data lock. Transport tests also verify that abrupt parent exit closes the child's input and ends the engine. The local build uses Apple Development signing for both the app and helper. Developer ID notarization and real Pushover/Bark delivery require the release credentials and notification keys respectively.

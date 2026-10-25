@@ -26,10 +26,12 @@ class ToolchainScripts(unittest.TestCase):
         self.sysroot.mkdir(parents=True)
         self.log = self.root / "calls.jsonl"
         self.env = os.environ.copy()
-        for key in ["APPLE_PICKUP_CARGO", "RUSTC", "CARGO_BUILD_RUSTC", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]:
+        for key in ["APPLE_PICKUP_CARGO", "RUSTC", "CARGO_BUILD_RUSTC", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "RUSTUP_AUTO_INSTALL", "CMAKE"]:
             self.env.pop(key, None)
         self.env.update(PATH="/usr/bin:/bin", FAKE_SYSROOT=str(self.sysroot), FAKE_LOG=str(self.log))
         self.make_tools(self.bin)
+        self.cmake = self.root / ".tools/cmake/CMake.app/Contents/bin/cmake"
+        self.make_cmake(self.cmake)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -42,7 +44,7 @@ class ToolchainScripts(unittest.TestCase):
         directory.mkdir(parents=True, exist_ok=True)
         self.executable(directory / "cargo", """import json,os,sys
 with open(os.environ['FAKE_LOG'],'a') as f:
- f.write(json.dumps({'tool':'cargo','argv':sys.argv[1:],'rustc':os.environ.get('RUSTC'),'cargo_home':os.environ.get('CARGO_HOME'),'rustup_home':os.environ.get('RUSTUP_HOME')})+'\\n')
+ f.write(json.dumps({'tool':'cargo','argv':sys.argv[1:],'rustc':os.environ.get('RUSTC'),'cargo_home':os.environ.get('CARGO_HOME'),'rustup_home':os.environ.get('RUSTUP_HOME'),'rustup_toolchain':os.environ.get('RUSTUP_TOOLCHAIN'),'rustup_auto_install':os.environ.get('RUSTUP_AUTO_INSTALL'),'cmake':os.environ.get('CMAKE'),'path':os.environ['PATH']})+'\\n')
 print('fake cargo')
 """)
         self.executable(directory / "rustc", """import os,pathlib,sys
@@ -64,6 +66,10 @@ elif sys.argv[1:3]==['target','add']:
 else: sys.exit(2)
 """)
 
+    def make_cmake(self, path, version="4.4.4"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.executable(path, "print('cmake version " + version + "')\n")
+
     def run_script(self, name, *arguments, **environment):
         env = dict(self.env, **environment)
         return subprocess.run(["/bin/bash", str(self.root / "scripts" / name), *arguments], cwd=self.root, env=env, text=True, capture_output=True)
@@ -84,16 +90,73 @@ else: sys.exit(2)
         self.assertEqual(call["rustc"], str(self.bin / "rustc"))
         self.assertEqual(call["cargo_home"], str(self.root / ".tools/cargo"))
         self.assertEqual(call["rustup_home"], str(self.root / ".tools/rustup"))
+        self.assertEqual(call["cmake"], str(self.cmake))
+        self.assertIn(str(self.bin), call["path"].split(":"))
+        self.assertIn(str(self.cmake.parent), call["path"].split(":"))
 
-    def test_path_and_explicit_overrides_take_precedence(self):
+    def test_local_tools_precede_path_but_explicit_overrides_win(self):
         other = self.root / "other bin"
         self.make_tools(other)
+        self.make_cmake(other / "cmake")
         result = self.run_script("cargo.sh", "--version", PATH=str(other) + ":/usr/bin:/bin")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[-1]["rustc"], str(self.bin / "rustc"))
+        self.assertEqual(self.calls()[-1]["cmake"], str(self.cmake))
+        result = self.run_script("cargo.sh", "--version", APPLE_PICKUP_CARGO=str(other / "cargo"), CMAKE=str(other / "cmake"))
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls()[-1]["rustc"], str(other / "rustc"))
+        self.assertEqual(self.calls()[-1]["cmake"], str(other / "cmake"))
         result = self.run_script("cargo.sh", "--version", APPLE_PICKUP_CARGO=str(self.bin / "cargo"), RUSTC=str(other / "rustc"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls()[-1]["rustc"], str(other / "rustc"))
+
+    def test_local_tools_ignore_unrelated_cargo_and_rustup_homes(self):
+        result = self.run_script("cargo.sh", "--version", CARGO_HOME=str(self.root / "foreign cargo"), RUSTUP_HOME=str(self.root / "foreign rustup"),
+                                 RUSTUP_AUTO_INSTALL="1", RUSTUP_TOOLCHAIN="explicit-toolchain")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.calls()[-1]
+        self.assertEqual(call["cargo_home"], str(self.root / ".tools/cargo"))
+        self.assertEqual(call["rustup_home"], str(self.root / ".tools/rustup"))
+        self.assertEqual(call["rustup_auto_install"], "0")
+        self.assertEqual(call["rustup_toolchain"], "explicit-toolchain")
+        self.assertFalse((self.root / "foreign cargo").exists())
+        self.assertFalse((self.root / "foreign rustup").exists())
+
+    def test_path_tools_are_supported_without_local_installation(self):
+        other = self.root / "external bin"
+        self.make_tools(other)
+        self.make_cmake(other / "cmake")
+        shutil.rmtree(self.bin)
+        shutil.rmtree(self.root / ".tools/cmake")
+        result = self.run_script("cargo.sh", "--version", PATH=str(other) + ":/usr/bin:/bin",
+                                 CARGO_HOME=str(self.root / "external cargo"), RUSTUP_HOME=str(self.root / "external rustup"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.calls()[-1]
+        self.assertEqual(call["rustc"], str(other / "rustc"))
+        self.assertEqual(call["cmake"], str(other / "cmake"))
+        self.assertEqual(call["cargo_home"], str(self.root / "external cargo"))
+        self.assertEqual(call["rustup_home"], str(self.root / "external rustup"))
+
+    def test_cargo_home_is_found_without_shell_path_configuration(self):
+        external_home = self.root / "external cargo"
+        self.make_tools(external_home / "bin")
+        shutil.rmtree(self.bin)
+        result = self.run_script("cargo.sh", "--version", CARGO_HOME=str(external_home))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[-1]["rustc"], str(external_home / "bin/rustc"))
+
+    def test_missing_or_old_cmake_stops_before_cargo(self):
+        missing = self.root / "missing cmake"
+        result = self.run_script("cargo.sh", "build", CMAKE=str(missing))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("setup-build-tools.sh", result.stderr)
+        self.assertFalse(self.calls())
+        old = self.root / "old cmake"
+        self.make_cmake(old, "3.21.9")
+        result = self.run_script("cargo.sh", "build", CMAKE=str(old))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("3.22 or newer", result.stderr)
+        self.assertFalse(self.calls())
 
     def test_all_architectures_are_checked_before_any_compile(self):
         self.installed("aarch64-apple-darwin")

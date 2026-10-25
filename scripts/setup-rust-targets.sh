@@ -3,8 +3,6 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
-# Match Xcode's tool search path, including GUI launches.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 source "$PROJECT_ROOT/scripts/rust-toolchain.sh"
 pickup_resolve_rust_toolchain "$PROJECT_ROOT"
 
