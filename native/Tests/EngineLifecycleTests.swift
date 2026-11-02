@@ -15,6 +15,86 @@ func waitFor(_ label: String, timeout: TimeInterval = 12, _ condition: @escaping
 
 @main
 struct EngineLifecycleTests {
+    @MainActor static func testManualRefresh(_ model: MonitorModel, root: URL) async throws {
+        func require(_ condition: Bool, _ message: String) throws {
+            if !condition { throw LifecycleFailure.failed(message) }
+        }
+        func requests(_ path: String) throws -> [[String: Any]] {
+            let log = root.appendingPathComponent("monitor-requests.jsonl")
+            guard FileManager.default.fileExists(atPath: log.path) else { return [] }
+            return try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map {
+                try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any]
+            }.filter { $0["path"] as? String == path }
+        }
+        func mark(_ name: String) throws { try Data().write(to: root.appendingPathComponent(name)) }
+
+        try require(model.canRefreshNow, "paused monitor with targets cannot refresh")
+        try mark("empty-targets")
+        await model.refresh()
+        try require(!model.canRefreshNow, "empty monitoring list enabled refresh")
+        try FileManager.default.removeItem(at: root.appendingPathComponent("empty-targets"))
+        await model.refresh()
+
+        let hold = root.appendingPathComponent("hold-refresh-reply")
+        try Data().write(to: hold)
+        let pending = Task { await model.refreshNow() }
+        try await waitFor("manual refresh did not become busy") { model.isBusy }
+        try require(!model.canRefreshNow, "busy model enabled another refresh")
+        let duplicate = await model.refreshNow()
+        try require(!duplicate, "manual refresh accepted a concurrent duplicate")
+        try FileManager.default.removeItem(at: hold)
+        let accepted = await pending.value
+        try require(accepted && model.isRefreshingStock && model.isCheckingStock, "manual refresh was not reflected in state")
+        try require(!model.state.running, "one-time refresh enabled automatic monitoring")
+        try require(!model.canRefreshNow && model.state.progress != nil, "active one-time refresh enabled another request or lost progress")
+        let activeDuplicate = await model.refreshNow()
+        try require(!activeDuplicate, "active check accepted a duplicate")
+        let first = try requests("/api/monitor/refresh")
+        try require(first.count == 1 && first[0]["method"] as? String == "POST", "refresh did not send exactly one POST")
+        try require((first[0]["body"] as? [String: Any])?.isEmpty == true, "refresh request body changed")
+        try require(try requests("/api/monitor").isEmpty, "refresh toggled monitoring instead of requesting a check")
+
+        try mark("complete-refresh")
+        await model.refresh()
+        try require(!model.isRefreshingStock && !model.state.running, "one-time completion did not return to paused")
+        try require(!model.canRefreshNow, "manual cooldown was ignored")
+        let cooling = await model.refreshNow()
+        try require(!cooling && (try requests("/api/monitor/refresh")).count == 1, "cooldown sent another request")
+        try mark("expire-refresh-cooldown")
+        await model.refresh()
+        try require(model.canRefreshNow, "expired cooldown did not permit refresh")
+
+        let saved = await model.saveSettings(intervalSeconds: 30, pushoverEnabled: true, barkEnabled: true,
+                                            pushoverToken: "", pushoverUser: "", barkURL: "")
+        try require(saved && model.state.intervalSeconds == 30, "30-second interval was not saved")
+        await model.setRunning(true)
+        try require(model.state.running && model.canRefreshNow, "idle automatic monitor could not refresh")
+        try mark("automatic-cycle")
+        await model.refresh()
+        try require(!model.canRefreshNow, "active automatic cycle allowed a duplicate refresh")
+        try FileManager.default.removeItem(at: root.appendingPathComponent("automatic-cycle"))
+        await model.refresh()
+        let runningRefresh = await model.refreshNow()
+        try require(runningRefresh && model.state.running && model.isRefreshingStock, "refresh changed automatic monitoring intent")
+        try mark("complete-refresh")
+        await model.refresh()
+        try require(model.state.running && !model.isRefreshingStock && model.state.intervalSeconds == 30,
+                    "refresh completion changed automatic monitoring or its saved interval")
+        await model.setRunning(false)
+        try mark("expire-refresh-cooldown")
+        await model.refresh()
+
+        let togglesBeforeFailure = try requests("/api/monitor").count
+        try mark("reject-refresh")
+        let rejected = await model.refreshNow()
+        try require(!rejected && model.errorMessage == "Manual refresh rejected.", "refresh failure was not shown")
+        try require(!model.state.running && !model.isRefreshingStock && !model.isBusy,
+                    "failed refresh left the app running or busy")
+        try require(try requests("/api/monitor").count == togglesBeforeFailure, "failed refresh enabled monitoring")
+        try require(try requests("/api/monitor/refresh").count == 3, "refresh failure was replayed")
+        try FileManager.default.removeItem(at: root.appendingPathComponent("reject-refresh"))
+    }
+
     @MainActor static func testNotificationDrafts(_ model: MonitorModel, root: URL) async throws {
         func require(_ condition: Bool, _ message: String) throws {
             if !condition { throw LifecycleFailure.failed(message) }
@@ -84,10 +164,16 @@ struct EngineLifecycleTests {
 #!/usr/bin/env python3
 import sys,json,pathlib,os,time
 root=pathlib.Path(sys.argv[sys.argv.index('--data-dir')+1])
+if (root/'instance-in-use').exists():
+ sys.stderr.write('fake-secret-diagnostic\n')
+ sys.stdout.write(json.dumps({'id':0,'status':409,'body':{'code':'instance_in_use'}})+'\n');sys.stdout.flush()
+ sys.exit(1)
 starts=root/'starts'
 generation=int(starts.read_text())+1 if starts.exists() else 1
 starts.write_text(str(generation))
 running=False
+refreshing=False
+manual_until=0
 language='en'
 credentials={}
 preferences={'pushoverEnabled':False,'barkEnabled':False}
@@ -98,16 +184,27 @@ try:
   q=json.loads(line);path=q['path'];body=q.get('body',{});status=200
   if path in ['/api/credentials','/api/settings','/api/notifications/test']:
    with (root/'notification-requests.jsonl').open('a') as log:log.write(json.dumps(q)+'\n')
+  if path in ['/api/monitor','/api/monitor/refresh']:
+   with (root/'monitor-requests.jsonl').open('a') as log:log.write(json.dumps(q)+'\n')
   if path=='/api/state':
    if (root/'crash').exists():
     (root/'crash').unlink();os._exit(17)
+   if (root/'complete-refresh').exists():refreshing=False;(root/'complete-refresh').unlink()
+   if (root/'expire-refresh-cooldown').exists():manual_until=0;(root/'expire-refresh-cooldown').unlink()
    settings={**preferences,'pushoverConfigured':bool(credentials.get('pushoverToken') and credentials.get('pushoverUser')),'barkConfigured':bool(credentials.get('barkUrl'))}
-   answer={'version':'0.4.0','running':running,'intervalSeconds':60,'nextCheckAt':None,'paced':False,'healthy':None,'notice':None,'catalogRefreshing':False,'targets':[target],'notifications':[],'settings':settings,'progress':None,'nextAllowedStartAt':int(allowed*1000),'notificationLanguage':language}
+   progress={'completedStores':0,'totalStores':1,'activeLocation':'Test store','startedAt':int(time.time()*1000),'phase':'checking','waitUntil':None} if refreshing or (root/'automatic-cycle').exists() else None
+   answer={'version':'0.4.0','running':running,'intervalSeconds':preferences.get('intervalSeconds',30),'nextCheckAt':int((time.time()+60)*1000) if running and not progress else None,'paced':False,'healthy':None,'notice':None,'catalogRefreshing':False,'targets':[] if (root/'empty-targets').exists() else [target],'notifications':[],'settings':settings,'progress':progress,'nextAllowedStartAt':int(allowed*1000),'notificationLanguage':language,'refreshingStock':refreshing,'nextManualCheckAt':int(manual_until*1000)}
   elif path=='/api/regions':answer={'regions':[{'locale':'en_AU','title':'Australia','baseUrl':'https://www.apple.com/au'}]}
   elif path.startswith('/api/catalog'):answer={'locale':'en_AU','stores':[],'products':[]}
   elif path=='/api/monitor':
    if body['running'] and time.time()<allowed:status=429;answer={'error':'Cooling down'}
-   else:running=body['running'];answer={'ok':True}
+   else:
+    running=body['running'];answer={'ok':True}
+    if not running:refreshing=False
+  elif path=='/api/monitor/refresh':
+   while (root/'hold-refresh-reply').exists():time.sleep(0.01)
+   if (root/'reject-refresh').exists():status=400;answer={'error':'Manual refresh rejected.'}
+   else:refreshing=True;manual_until=time.time()+30;answer={'ok':True}
   elif path=='/api/language':language=body['language'];answer={'ok':True}
   elif path=='/api/credentials':
    credentials.update(body);(root/'saved-credentials.json').write_text(json.dumps(credentials));answer={'ok':True}
@@ -125,13 +222,26 @@ finally:
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
             let instance = MonitorModel(dataDirectory: root, helperURL: helper)
             model = instance
+            let conflict = root.appendingPathComponent("instance-in-use")
+            try Data().write(to: conflict)
             guard !instance.canTestNotification(channel: "pushover", pushoverToken: "draft-token", pushoverUser: "draft-user") else {
                 throw LifecycleFailure.failed("notification test enabled before the engine was ready")
             }
             await instance.start()
+            let conflictMessage = "Another copy of Apple Pickup Monitor is using this monitoring data. Quit that copy to continue."
+            try await waitFor("startup conflict did not preserve its explanation") {
+                !instance.isReady && instance.errorMessage == conflictMessage
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+            guard instance.errorMessage == conflictMessage else {
+                throw LifecycleFailure.failed("generic recovery message overwrote the startup conflict")
+            }
+            try FileManager.default.removeItem(at: conflict)
             try await waitFor("engine did not initialize") { instance.isReady }
+            guard instance.errorMessage == nil else { throw LifecycleFailure.failed("successful recovery retained the startup conflict") }
             guard !instance.state.running else { throw LifecycleFailure.failed("fresh launch started monitoring unexpectedly") }
             try await testNotificationDrafts(instance, root: root)
+            try await testManualRefresh(instance, root: root)
             await instance.setRunning(true)
             try await waitFor("monitoring did not start") { instance.state.running }
             try Data().write(to: root.appendingPathComponent("crash"))
@@ -153,7 +263,7 @@ finally:
             }
             guard !instance.isReady else { throw LifecycleFailure.failed("quit left the app ready") }
             try? FileManager.default.removeItem(at: root)
-            print("Engine lifecycle tests passed: notification drafts and explicit saves, startup, automatic recovery, resume, pause preservation and EOF shutdown.")
+            print("Engine lifecycle tests passed: manual refresh and 30-second settings, startup conflict recovery, notification drafts, automatic recovery, pause preservation and EOF shutdown.")
         } catch {
             await model?.shutdown()
             try? FileManager.default.removeItem(at: root)

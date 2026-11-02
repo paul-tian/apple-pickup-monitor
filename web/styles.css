@@ -420,6 +420,13 @@ h1 {
   gap: 13px;
   flex-wrap: wrap;
 }
+.watch-panel .panel-heading,
+.watch-panel .button-group {
+  flex-wrap: wrap;
+}
+.watch-panel .button-group {
+  margin-left: auto;
+}
 h2 {
   font-size: 16px;
   font-weight: 600;

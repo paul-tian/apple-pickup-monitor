@@ -29,6 +29,15 @@ final class MonitorModel: ObservableObject {
     private var languageSyncing = false
     let dataDirectory: URL
 
+    var isRefreshingStock: Bool { state.refreshingStock == true }
+    var isCheckingStock: Bool {
+        isRefreshingStock || state.progress != nil || (state.running && state.nextCheckAt == nil)
+    }
+    var canRefreshNow: Bool {
+        isReady && !isBusy && !resumingMonitoring && !state.targets.isEmpty && !isCheckingStock &&
+            (state.nextManualCheckAt ?? 0) <= Date().timeIntervalSince1970 * 1000
+    }
+
     init(dataDirectory: URL? = nil, helperURL: URL? = nil) {
         let args = ProcessInfo.processInfo.arguments
         let argumentDirectory: URL? = args.lastIndex(of: "--data-dir").flatMap { index in
@@ -39,7 +48,7 @@ final class MonitorModel: ObservableObject {
         self.dataDirectory = custom ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Apple Pickup Monitor", isDirectory: true)
         engine = EngineTransport(dataDirectory: custom, helperURL: helperURL)
-        engine.onUnexpectedExit = { [weak self] in self?.engineFailed() }
+        engine.onUnexpectedExit = { [weak self] error in self?.engineFailed(error) }
     }
 
     /// This task belongs to the application, not to the lifetime of its window.
@@ -101,13 +110,13 @@ final class MonitorModel: ObservableObject {
         }
     }
 
-    private func engineFailed() {
+    private func engineFailed(_ error: EngineTransportError? = nil) {
         guard !shuttingDown else { return }
         isReady = false
         isRecovering = true
         resumingMonitoring = desiredRunning
         engineStatus = "Restarting monitoring engine…"
-        errorMessage = "The monitoring engine stopped unexpectedly. Restarting automatically."
+        errorMessage = error?.localizedDescription ?? "The monitoring engine stopped unexpectedly. Restarting automatically."
     }
 
     private func request<T: Decodable>(_ path: String, method: String = "GET", body: [String: Any]? = nil,
@@ -138,7 +147,7 @@ final class MonitorModel: ObservableObject {
         } catch {
             guard !shuttingDown else { return }
             pollFailures += 1
-            if !engine.isRunning || pollFailures >= 3 { engineFailed() }
+            if !engine.isRunning || pollFailures >= 3 { engineFailed(error as? EngineTransportError) }
         }
     }
 
@@ -156,7 +165,7 @@ final class MonitorModel: ObservableObject {
             resumingMonitoring = false
             desiredRunning = false
             errorMessage = message
-        } catch { engineFailed() }
+        } catch { engineFailed(error as? EngineTransportError) }
     }
 
     @discardableResult
@@ -173,7 +182,7 @@ final class MonitorModel: ObservableObject {
             // Never automatically replay mutations: a timed-out notification may
             // already have been accepted by its provider.
             errorMessage = error.localizedDescription
-            if !engine.isRunning { engineFailed() }
+            if !engine.isRunning { engineFailed(error as? EngineTransportError) }
             return false
         }
     }
@@ -193,7 +202,17 @@ final class MonitorModel: ObservableObject {
         } catch EngineTransportError.remote(_, let message) {
             desiredRunning = state.running
             errorMessage = message
-        } catch { engineFailed() }
+        } catch { engineFailed(error as? EngineTransportError) }
+    }
+
+    @discardableResult
+    func refreshNow() async -> Bool {
+        guard canRefreshNow else { return false }
+        isBusy = true; defer { isBusy = false }
+        errorMessage = nil; successMessage = nil
+        let accepted = await mutate("/api/monitor/refresh", body: [:])
+        if accepted { successMessage = "Stock refresh requested." }
+        return accepted
     }
 
     func addTargets(storeNumbers: [String], partNumbers: [String]) async -> Bool {

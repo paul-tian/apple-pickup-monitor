@@ -26,6 +26,13 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 8;
 
+/// ID zero is reserved for failures before requests can be dispatched. Keep the
+/// payload fixed: no file paths, credentials or arbitrary diagnostic text.
+pub fn write_instance_in_use(output: &mut impl std::io::Write) -> std::io::Result<()> {
+    output.write_all(b"{\"id\":0,\"status\":409,\"body\":{\"code\":\"instance_in_use\"}}\n")?;
+    output.flush()
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Command {

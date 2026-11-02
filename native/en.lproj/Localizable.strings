@@ -8,6 +8,8 @@
 "Add %d monitoring targets" = "Add %d monitoring targets";
 "Add a configuration and one or more stores above." = "Add a configuration and one or more stores above.";
 "Add monitoring targets" = "Add monitoring targets";
+"Expanded" = "Expanded";
+"Collapsed" = "Collapsed";
 "Alerts and test notifications will appear here." = "Alerts and test notifications will appear here.";
 "Apple Pickup Monitor" = "Apple Pickup Monitor";
 "Apple Store" = "Apple Store";
@@ -53,7 +55,7 @@
 "Leave blank to keep saved keys." = "Leave blank to keep saved keys.";
 "Loading regional catalogue…" = "Loading regional catalogue…";
 "Mac" = "Mac";
-"Minimum 60 seconds.\nActual checks respect Apple's request limits." = "Minimum 60 seconds.\nActual checks respect Apple's request limits.";
+"Minimum 30 seconds.\nActual checks respect Apple's request limits." = "Minimum 30 seconds.\nActual checks respect Apple's request limits.";
 "Model" = "Model";
 "Monitoring" = "Monitoring";
 "Monitoring %d targets" = "Monitoring %d targets";
@@ -141,7 +143,7 @@
 "Each region supports 20 distinct part numbers, including any required Apple Watch bands. Remove some products first." = "Each region supports 20 distinct part numbers, including any required Apple Watch bands. Remove some products first.";
 "Add a store and product before starting." = "Add a store and product before starting.";
 "Choose a supported notification language." = "Choose a supported notification language.";
-"Choose a polling interval between 60 and 3600 seconds." = "Choose a polling interval between 60 and 3600 seconds.";
+"Choose a polling interval between 30 and 3600 seconds." = "Choose a polling interval between 30 and 3600 seconds.";
 "Save both Pushover keys before enabling Pushover." = "Save both Pushover keys before enabling Pushover.";
 "Save a Bark URL before enabling Bark." = "Save a Bark URL before enabling Bark.";
 "Select Pushover or Bark." = "Select Pushover or Bark.";
@@ -149,7 +151,7 @@
 "This notification channel is disabled." = "This notification channel is disabled.";
 "The catalogue was refreshed recently. Allow five minutes between refreshes." = "The catalogue was refreshed recently. Allow five minutes between refreshes.";
 "Product catalogue refreshed." = "Product catalogue refreshed.";
-"Saved polling interval is invalid; expected 60–3600 seconds." = "Saved polling interval is invalid; expected 60–3600 seconds.";
+"Saved polling interval is invalid; expected 30–3600 seconds." = "Saved polling interval is invalid; expected 30–3600 seconds.";
 "Monitoring target removed before delivery" = "Monitoring target removed before delivery";
 "Monitoring target is no longer eligible for this alert" = "Monitoring target is no longer eligible for this alert";
 "Starting monitoring engine…" = "Starting monitoring engine…";
@@ -167,5 +169,26 @@
 "Bundled monitoring engine version does not match this app. Rebuild or reinstall the app." = "Bundled monitoring engine version does not match this app. Rebuild or reinstall the app.";
 "The monitoring engine stopped unexpectedly. Restarting automatically." = "The monitoring engine stopped unexpectedly. Restarting automatically.";
 "The monitoring engine stopped unexpectedly." = "The monitoring engine stopped unexpectedly.";
+"Another copy of Apple Pickup Monitor is using this monitoring data. Quit that copy to continue." = "Another copy of Apple Pickup Monitor is using this monitoring data. Quit that copy to continue.";
 "The monitoring engine stopped accepting requests." = "The monitoring engine stopped accepting requests.";
 "The monitoring engine stopped unexpectedly. Quit and reopen the app." = "The monitoring engine stopped unexpectedly. Quit and reopen the app.";
+
+"Refresh now" = "Refresh now";
+
+"Refreshing…" = "Refreshing…";
+
+"Refreshing stock…" = "Refreshing stock…";
+
+"Stop refresh" = "Stop refresh";
+
+"Stock refresh requested." = "Stock refresh requested.";
+
+"Add a store and product before refreshing." = "Add a store and product before refreshing.";
+
+"A stock check is already in progress." = "A stock check is already in progress.";
+
+"Refresh available in %d seconds." = "Refresh available in %d seconds.";
+
+"Fetch current availability once. Apple request pacing still applies. (⇧⌘R)" = "Fetch current availability once. Apple request pacing still applies. (⇧⌘R)";
+
+"Wait for the current request cooldown before refreshing again." = "Wait for the current request cooldown before refreshing again.";

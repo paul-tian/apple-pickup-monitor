@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 enum EngineTransportError: LocalizedError {
-    case notRunning, helperMissing, busy, requestTooLarge, invalidResponse, timeout
+    case notRunning, helperMissing, instanceInUse, busy, requestTooLarge, invalidResponse, timeout
     case failed(String)
     case remote(status: Int, message: String)
 
@@ -10,6 +10,7 @@ enum EngineTransportError: LocalizedError {
         switch self {
         case .notRunning: return "The monitoring engine is starting."
         case .helperMissing: return "The monitoring engine is missing from this app. Rebuild or download the complete app."
+        case .instanceInUse: return "Another copy of Apple Pickup Monitor is using this monitoring data. Quit that copy to continue."
         case .busy: return "The app is busy. Please try again shortly."
         case .requestTooLarge: return "This request is too large. Select fewer monitoring targets."
         case .invalidResponse: return "The monitoring engine returned an unexpected response."
@@ -23,7 +24,7 @@ enum EngineTransportError: LocalizedError {
 /// discovery file, access token, or independently running service is involved.
 @MainActor
 final class EngineTransport {
-    var onUnexpectedExit: (() -> Void)?
+    var onUnexpectedExit: ((EngineTransportError) -> Void)?
     var isRunning: Bool { process?.isRunning == true && input != nil && !stopping }
 
     private struct Pending {
@@ -43,6 +44,9 @@ final class EngineTransport {
     private var generation: UInt64 = 0
     private var stopping = false
     private var exitReported = false
+    private var awaitingStartup = true
+    private var lastFailure: EngineTransportError?
+    private var exitFallback: Task<Void, Never>?
     private static let maximumRequestBytes = 64 * 1024
     private static let maximumPendingRequests = 32
 
@@ -60,6 +64,8 @@ final class EngineTransport {
         let currentGeneration = generation
         stopping = false
         exitReported = false
+        awaitingStartup = true
+        lastFailure = nil
 
         let bundledHelper = Bundle.main.executableURL?
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -107,9 +113,9 @@ final class EngineTransport {
         child.terminationHandler = { [weak self] _ in
             // Normally stdout EOF follows all responses. This delayed fallback
             // also handles a child that exits while another process holds stdout.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == currentGeneration, !self.exitReported else { return }
-                self.transportFailed(.failed("The monitoring engine stopped unexpectedly."), generation: currentGeneration)
+                self.scheduleUnexpectedExit(generation: currentGeneration)
             }
         }
         do {
@@ -130,7 +136,12 @@ final class EngineTransport {
     func request(path: String, method: String = "GET", body: [String: Any]? = nil,
                  timeout: TimeInterval = 8) async throws -> Data {
         try Task.checkCancellation()
-        guard isRunning, let pipe = input else { throw EngineTransportError.notRunning }
+        // A child can exit just before its startup diagnostic reaches the main
+        // actor. Keep its request pending until stdout is drained instead of
+        // replacing that diagnostic with an early notRunning/EPIPE error.
+        guard !stopping, !exitReported, let pipe = input else {
+            throw stopping ? EngineTransportError.notRunning : lastFailure ?? .notRunning
+        }
         guard pending.count < Self.maximumPendingRequests else { throw EngineTransportError.busy }
         guard path.hasPrefix("/api/"), !path.contains("\n"), !path.contains("\r"),
               ["GET", "POST", "PUT"].contains(method) else { throw EngineTransportError.invalidResponse }
@@ -164,7 +175,7 @@ final class EngineTransport {
                     do { try pipe.write(wireFrame) }
                     catch {
                         DispatchQueue.main.async { [weak self] in
-                            self?.transportFailed(.failed("The monitoring engine stopped unexpectedly."), generation: currentGeneration)
+                            self?.scheduleUnexpectedExit(generation: currentGeneration)
                         }
                     }
                 }
@@ -207,7 +218,19 @@ final class EngineTransport {
         guard generation == expectedGeneration, !exitReported else { return }
         do {
             let response = try JSONDecoder().decode(EngineResponse.self, from: frame)
+            if response.id == 0 {
+                let body = try JSONEncoder().encode(response.body)
+                let failure = try JSONDecoder().decode(EngineStartupFailure.self, from: body)
+                guard awaitingStartup, response.status == 409, failure.code == "instance_in_use" else {
+                    throw EngineTransportError.invalidResponse
+                }
+                // Only a known code becomes UI text. Never display arbitrary
+                // helper diagnostics or read an older/shared stderr log.
+                transportFailed(.instanceInUse, generation: expectedGeneration)
+                return
+            }
             guard pending[response.id] != nil else { return } // timed out/cancelled response
+            awaitingStartup = false
             guard (100...599).contains(response.status) else { throw EngineTransportError.invalidResponse }
             let body = try JSONEncoder().encode(response.body)
             if (200..<300).contains(response.status) { complete(id: response.id, result: .success(body)) }
@@ -234,16 +257,31 @@ final class EngineTransport {
         }
     }
 
+    private func scheduleUnexpectedExit(generation expectedGeneration: UInt64) {
+        guard generation == expectedGeneration, !exitReported, exitFallback == nil else { return }
+        // The read framer delivers a final frame before EOF. Allow that path to
+        // win over a simultaneous broken stdin pipe/process termination event.
+        // The fallback remains bounded if some descendant keeps stdout open.
+        exitFallback = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 200_000_000) }
+            catch { return }
+            self?.transportFailed(.failed("The monitoring engine stopped unexpectedly."), generation: expectedGeneration)
+        }
+    }
+
     private func transportFailed(_ error: EngineTransportError, generation expectedGeneration: UInt64) {
         guard generation == expectedGeneration, !exitReported else { return }
         exitReported = true
+        lastFailure = error
         failAll(error)
         releaseHandles()
         if process?.isRunning == true { process?.terminate() }
-        if !stopping { onUnexpectedExit?() }
+        if !stopping { onUnexpectedExit?(error) }
     }
 
     private func releaseHandles() {
+        exitFallback?.cancel()
+        exitFallback = nil
         framer?.stop()
         framer = nil
         input?.close()
@@ -380,6 +418,7 @@ private struct EngineResponse: Decodable {
     let body: EngineJSON
 }
 private struct EngineErrorBody: Decodable { let error: String }
+private struct EngineStartupFailure: Decodable { let code: String }
 private indirect enum EngineJSON: Codable {
     case null, bool(Bool), integer(Int64), unsigned(UInt64), number(Double), string(String)
     case array([EngineJSON]), object([String: EngineJSON])

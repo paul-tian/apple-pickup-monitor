@@ -11,9 +11,10 @@ struct MonitorContentView: View {
     @State private var colors = Set<String>()
     @State private var parts = Set<String>()
     @State private var selectedRows = Set<String>()
+    @AppStorage("native.addTargetsExpanded") private var addTargetsExpanded = true
     @AppStorage("native.settingsExpanded") private var settingsExpanded = false
     @AppStorage("uiLanguage") private var uiLanguage = "system"
-    @State private var interval = 60
+    @State private var interval = 30
     @State private var pushoverEnabled = false
     @State private var barkEnabled = false
     @State private var pushoverToken = ""
@@ -48,7 +49,8 @@ struct MonitorContentView: View {
     private var availableCount: Int { model.state.targets.filter { $0.availability.isAvailable }.count }
     private var unknownCount: Int { model.state.targets.filter { $0.availability.isUnknown }.count }
     private var unavailableCount: Int { model.state.targets.filter { $0.availability.kind == "out_of_stock" }.count }
-    private var monitoringRequested: Bool { model.state.running || model.resumingMonitoring }
+    private var monitoringRequested: Bool { model.state.running || model.resumingMonitoring || model.isRefreshingStock }
+    private var oneTimeRefresh: Bool { model.isRefreshingStock && !model.state.running && !model.resumingMonitoring }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -103,24 +105,35 @@ struct MonitorContentView: View {
             HStack(spacing: 6) {
                 Circle().fill(!model.isReady ? Color.orange : model.state.running ? Color.green : Color.secondary)
                     .frame(width: 7, height: 7)
-                Text(L10n.text(!model.isReady ? model.engineStatus : model.resumingMonitoring ? "Resuming shortly" : model.state.running ? "Monitoring" : "Paused"))
+                Text(L10n.text(!model.isReady ? model.engineStatus : model.resumingMonitoring ? "Resuming shortly" : model.isRefreshingStock ? "Refreshing stock…" : model.state.running ? "Monitoring" : "Paused"))
                     .foregroundStyle(.secondary).font(.subheadline)
+            }
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Button {
+                    Task { await model.refreshNow() }
+                } label: {
+                    Label(L10n.text(model.isRefreshingStock ? "Refreshing…" : "Refresh now"), systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered).controlSize(.large)
+                .disabled(!model.canRefreshNow)
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .help(refreshHelp(now: context.date))
             }
             Button {
                 Task { await model.setRunning(!monitoringRequested) }
             } label: {
-                Label(L10n.text(monitoringRequested ? "Pause" : "Start monitoring"), systemImage: monitoringRequested ? "pause.fill" : "play.fill")
+                Label(L10n.text(oneTimeRefresh ? "Stop refresh" : monitoringRequested ? "Pause" : "Start monitoring"), systemImage: monitoringRequested ? "pause.fill" : "play.fill")
                     .frame(minWidth: 110)
             }
             .buttonStyle(.borderedProminent).controlSize(.large)
             .disabled(!model.isReady || model.isBusy || (!model.state.running && model.state.targets.isEmpty))
             .keyboardShortcut("r", modifiers: [.command])
-            .help(L10n.text(model.state.running ? "Pause stock checks" : "Start stock checks (⌘R)"))
+            .help(L10n.text(oneTimeRefresh ? "Stop refresh" : monitoringRequested ? "Pause stock checks" : "Start stock checks (⌘R)"))
         }
     }
 
     private var addPanel: some View {
-        NativePanel {
+        NativePanel(isExpanded: $addTargetsExpanded) {
             HStack {
                 Text(L10n.text("Add monitoring targets")).fontWeight(.semibold)
                 Text(L10n.text("Choose multiple stores and configurations to add them together."))
@@ -232,7 +245,7 @@ struct MonitorContentView: View {
                                     .accessibilityLabel(L10n.text("Polling interval in seconds"))
                                 Text(L10n.text("seconds")).foregroundStyle(.secondary)
                             }
-                            Text(L10n.text("Minimum 60 seconds.\nActual checks respect Apple's request limits."))
+                            Text(L10n.text("Minimum 30 seconds.\nActual checks respect Apple's request limits."))
                                 .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }.frame(width: 190, alignment: .leading)
                         VStack(alignment: .leading, spacing: 7) {
@@ -276,7 +289,7 @@ struct MonitorContentView: View {
                     }
                     Button(L10n.text("Save settings")) { saveSettings() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(model.isBusy || !model.isReady || !(60...3600).contains(interval))
+                        .disabled(model.isBusy || !model.isReady || !(30...3600).contains(interval))
                 }.padding(12).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -404,11 +417,14 @@ struct MonitorContentView: View {
                 } else if model.resumingMonitoring {
                     Image(systemName: "clock").foregroundStyle(.secondary)
                     Text(L10n.text("Resuming monitoring at the next allowed request slot…")).foregroundStyle(.secondary)
-                } else if model.state.running, let progress = model.state.progress {
+                } else if monitoringRequested, let progress = model.state.progress {
                     ProgressView(value: Double(progress.completedStores), total: Double(max(progress.totalStores, 1)))
                         .frame(width: 80)
                     Text(L10n.format("%d / %d stores checked", progress.completedStores, progress.totalStores)).monospacedDigit()
                     Text(progressDetail(progress, now: context.date)).foregroundStyle(.secondary).lineLimit(1)
+                } else if model.isRefreshingStock {
+                    ProgressView().controlSize(.small)
+                    Text(L10n.text("Refreshing stock…")).foregroundStyle(.secondary)
                 } else if model.state.running {
                     Image(systemName: "clock").foregroundStyle(.secondary)
                     Text(nextCheckText(now: context.date)).monospacedDigit()
@@ -426,6 +442,14 @@ struct MonitorContentView: View {
     private var settingsSummary: String {
         let channels = [model.state.settings.pushoverEnabled ? "Pushover" : nil, model.state.settings.barkEnabled ? "Bark" : nil].compactMap { $0 }
         return L10n.format("%ds minimum interval · %@", model.state.intervalSeconds, channels.isEmpty ? L10n.text("Notifications off") : channels.joined(separator: " + "))
+    }
+    private func refreshHelp(now: Date) -> String {
+        if model.state.targets.isEmpty { return L10n.text("Add a store and product before refreshing.") }
+        if model.isCheckingStock { return L10n.text("A stock check is already in progress.") }
+        if let next = model.state.nextManualCheckAt, next > now.timeIntervalSince1970 * 1000 {
+            return L10n.format("Refresh available in %d seconds.", Int(ceil(next / 1000 - now.timeIntervalSince1970)))
+        }
+        return L10n.text("Fetch current availability once. Apple request pacing still applies. (⇧⌘R)")
     }
     private func loadSettingsIfReady() {
         guard model.isReady, !settingsLoaded else { return }
@@ -465,7 +489,7 @@ struct MonitorContentView: View {
     private func notice(_ text: String, symbol: String, color: Color) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: symbol).foregroundColor(color)
-            Text(L10n.text(text)).textSelection(.enabled).lineLimit(3)
+            Text(L10n.text(text)).lineLimit(3)
             Spacer(minLength: 0)
         }.font(.caption).padding(.horizontal, 12).padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -510,13 +534,31 @@ private struct SummaryBadge: View {
 }
 
 private struct NativePanel<Header: View, Content: View>: View {
+    var isExpanded: Binding<Bool>? = nil
     @ViewBuilder let header: () -> Header
     @ViewBuilder let content: () -> Content
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header().padding(.horizontal, 12).padding(.vertical, 9)
-            Divider()
-            content().padding(12)
+            if let isExpanded {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { isExpanded.wrappedValue.toggle() }
+                } label: {
+                    HStack(spacing: 12) {
+                        header()
+                        Image(systemName: isExpanded.wrappedValue ? "chevron.up" : "chevron.down")
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }.padding(.horizontal, 12).padding(.vertical, 10).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(L10n.text(isExpanded.wrappedValue ? "Expanded" : "Collapsed"))
+            } else {
+                header().padding(.horizontal, 12).padding(.vertical, 9)
+            }
+            if isExpanded?.wrappedValue ?? true {
+                Divider()
+                content().padding(12)
+            }
         }.background(Color(nsColor: .controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.1)))

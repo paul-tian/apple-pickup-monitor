@@ -103,9 +103,13 @@ async fn run() -> Result<(), String> {
                 native = true;
                 no_open = true;
             }
+            "--version" | "-V" => {
+                println!("{}", env!("APPLE_PICKUP_APP_VERSION"));
+                return Ok(());
+            }
             "--help" | "-h" => {
                 println!(
-                    "Apple Pickup Monitor\n  --no-open       Do not open the diagnostic browser\n  --native        Private stdin/stdout engine owned by the native app; no web server\n  --port NUMBER   Diagnostic web port (default 8765; 0 chooses a free port)\n  --data-dir PATH Isolated application data, cache, logs and Keychain namespace"
+                    "Apple Pickup Monitor\n  --no-open       Do not open the diagnostic browser\n  --native        Private stdin/stdout engine owned by the native app; no web server\n  --port NUMBER   Diagnostic web port (default 8765; 0 chooses a free port)\n  --data-dir PATH Isolated application data, cache, logs and Keychain namespace\n  --version, -V   Print the compiled app version without accessing application data"
                 );
                 return Ok(());
             }
@@ -133,8 +137,15 @@ async fn run() -> Result<(), String> {
     }
     let lock = private_file(&paths.data.join("instance.lock"))?;
     let session_path = paths.data.join("session.json");
-    if lock.try_lock_exclusive().is_err() {
+    if let Err(error) = lock.try_lock_exclusive() {
+        if error.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(format!("Could not lock the monitoring data: {error}"));
+        }
         if native {
+            // No command router exists yet. Send an allowlisted startup cause
+            // before EOF so the app can explain the conflict without reading
+            // a shared log or displaying arbitrary stderr text.
+            let _ = ipc::write_instance_in_use(&mut std::io::stdout().lock());
             return Err("Another monitoring instance is already using this application data. Quit that instance before opening this app.".into());
         }
         let session: Session = serde_json::from_slice(

@@ -71,7 +71,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            interval_seconds: 60,
+            interval_seconds: 30,
             pushover_enabled: false,
             bark_enabled: false,
             notification_language: "en".into(),

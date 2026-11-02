@@ -4,6 +4,10 @@ A native macOS app for monitoring Apple Store pickup availability across 25 supp
 
 Open the app to see your monitoring list. The app starts and owns its bundled monitoring engine automatically. Closing the window leaves monitoring active; reopen it from the menu bar or Dock. Quit Apple Pickup Monitor to stop the app and engine.
 
+The interface uses one main window. Dock and menu-bar actions reopen its SwiftUI scene without retaining a closed hosting window or creating a second one. Closing, reopening, and minimizing this window do not restart the monitoring engine.
+
+Only one running copy can use the same monitoring database. Before running a new build from Xcode, quit an installed copy with **⌘Q**; closing its window is not enough. A second copy shows an explanation and retries automatically after the other copy quits. Do not delete `instance.lock` while a copy is running.
+
 The native app communicates with its engine through private parent/child pipes. It does not start a TCP web server, discover a server through a session file, or require a connection/reconnection action. A fresh app launch starts paused. If the engine exits unexpectedly while the app remains open, the app attempts automatic recovery with bounded retry delays and resumes the requested monitoring state while respecting request cooldowns. If recovery cannot finish, the app reports the failure. The engine stops when its app-owned input closes, including when the app exits unexpectedly.
 
 ## Current scope
@@ -17,7 +21,9 @@ The native app communicates with its engine through private parent/child pipes. 
 - Pushover and Bark notifications with test actions.
 - Hornsby (R458) is excluded because it permanently closed; older monitoring targets for that store are removed on startup.
 
-The 60-second default is a minimum round interval, not a promise to check every store each minute. Requests are paced, and the app displays progress and the actual next check. Catalogue refreshes are limited to one per five minutes. After an Apple block, restarting conservatively preserves a wait of up to 30 minutes instead of bypassing the upstream cooldown.
+The polling interval defaults to 30 seconds and accepts 30–3600 seconds. Existing saved intervals are preserved. This setting is the base round interval; request pacing and backoff can extend the actual wait. The app displays progress and the next scheduled check. Catalogue refreshes are limited to one per five minutes. After an Apple block, restarting conservatively preserves a wait of up to 30 minutes instead of bypassing the upstream cooldown.
+
+**Refresh now** (⇧⌘R) fetches current pickup availability for all saved monitoring targets. During automatic monitoring it brings the next round forward without changing the configured interval. While paused, it performs one round and stays paused; **Stop refresh** cancels that round. Paused manual checks update stock results without sending notifications. Refresh requests share the normal Apple client, request budget, and cooldowns, with at least 30 seconds between manual requests. The button is disabled during an active round or cooldown, and repeated requests do not create overlapping rounds. It refreshes stock availability rather than the product catalogue.
 
 This remains a development build until the signed distribution workflow is completed. The earlier service prototype passed live Apple Australia checks on 26 October 2026. These were point-in-time integration tests, not a guarantee of current stock or future endpoint availability. Real notification delivery needs to be verified with your own credentials.
 
@@ -99,9 +105,10 @@ A timeout after a provider accepts a message can still cause a duplicate on retr
 ./scripts/test-engine-lifecycle.sh
 python3 scripts/tests/test_rust_toolchain.py
 python3 scripts/tests/test_build_tools_setup.py
+python3 scripts/tests/test_app_version.py
 ```
 
-The native v0.4.0 build preserves the existing 16-target Australian database. Xcode build, 48 Rust tests, native model/localization tests, private-pipe transport tests, notification draft tests, automatic-recovery lifecycle tests, and bundle signature verification pass. Notification tests cover testing before saving, blank-field fallback, provider isolation, and preserving saved credentials after failures. A live check completed all 16 targets without a TCP listener or session file; Quit released the engine's data lock. Transport tests also verify that abrupt parent exit closes the child's input and ends the engine. The local build uses Apple Development signing for both the app and helper. Developer ID notarization and real Pushover/Bark delivery require the release credentials and notification keys respectively.
+The native build preserves the existing monitoring database. Xcode build, 57 Rust tests, native model/localization tests, private-pipe transport tests, notification draft tests, automatic-recovery lifecycle tests, and bundle signature verification pass. Manual refresh tests cover one-shot checks while paused, advancing an automatic schedule, duplicate requests, cancellation, cooldowns, and 30-second validation. Notification tests cover testing before saving, blank-field fallback, provider isolation, and preserving saved credentials after failures. A prior live check completed all 16 targets without a TCP listener or session file; Quit released the engine's data lock. Transport tests also verify that abrupt parent exit closes the child's input and ends the engine. Startup-conflict tests check that a second instance reports the held database lock without replacing it, and recovers when the conflict clears. Version checks cover incremental engine-version changes, inherited Xcode metadata, explicit overrides, and refusal to package a mismatched helper. The local build uses Apple Development signing for both the app and helper. Developer ID notarization and real Pushover/Bark delivery require the release credentials and notification keys respectively.
 
 The standalone diagnostic web service can still be run manually, separately from the native app:
 
@@ -121,13 +128,15 @@ SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build-
 
 The helper is signed before the containing app, with hardened runtime and a secure timestamp. Building does not submit software to Apple.
 
+Set the app's release version in Xcode's **Version** field (`MARKETING_VERSION`). The helper build passes that value to Rust, and changing it recompiles the engine with the matching version. You do not need to update `Cargo.toml` when changing the Xcode app version; its package version is the fallback for standalone Cargo builds. The packaging script inherits Xcode's version and build number by default. Explicit `APP_VERSION` and `BUILD_NUMBER` values override them; `APP_VERSION` updates both the app and its engine. Native-architecture builds verify the helper's reported version before packaging, and the app retains its startup check for mismatched bundles.
+
 After configuring a `notarytool` credential profile in Keychain, explicitly notarize:
 
 ```sh
 ./scripts/notarize-app.sh YOUR_KEYCHAIN_PROFILE
 ```
 
-This uploads the signed app, waits for acceptance, staples the ticket, verifies it, and writes `dist/Apple Pickup Monitor-notarized.zip`. Validate the downloaded archive on a clean Mac and test upgrades before publishing. `APP_VERSION` and `BUILD_NUMBER` override bundle version metadata. Supply the corresponding GPL source and dependency notices with a release.
+This uploads the signed app, waits for acceptance, staples the ticket, verifies it, and writes `dist/Apple Pickup Monitor-notarized.zip`. Validate the downloaded archive on a clean Mac and test upgrades before publishing. Supply the corresponding GPL source and dependency notices with a release.
 
 ## Apple endpoint behavior
 

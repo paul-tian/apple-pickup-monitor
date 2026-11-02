@@ -44,7 +44,16 @@ do {
     try expect(state.targets[0].id == "en_AU|R238|MK2D4X/A", "Monitoring target identity changed")
     try expect(state.targets[0].availability.isUnknown, "Pending result must remain unknown")
     try expect(state.targets[0].availability.label == "Waiting", "Pending label changed")
-    try expect(state.nextAllowedStartAt == nil && state.progress == nil, "Older states must support absent optional fields")
+    try expect(state.nextAllowedStartAt == nil && state.progress == nil && state.refreshingStock == nil && state.nextManualCheckAt == nil,
+               "Older states must support absent optional fields")
+    var manualPayload = try JSONSerialization.jsonObject(with: Data(capturedState.utf8)) as! [String: Any]
+    manualPayload["running"] = false
+    manualPayload["refreshingStock"] = true
+    manualPayload["nextManualCheckAt"] = 1792946819646
+    manualPayload["progress"] = ["completedStores": 0, "totalStores": 1, "startedAt": 1792946759646, "phase": "checking"]
+    let manual = try JSONDecoder().decode(MonitorState.self, from: JSONSerialization.data(withJSONObject: manualPayload))
+    try expect(!manual.running && manual.refreshingStock == true && manual.nextManualCheckAt == 1792946819646 && manual.progress != nil,
+               "A paused one-time refresh must preserve progress and cooldown without reporting automatic monitoring")
 
     let labels: [(String, String?, String)] = [
         ("in_stock", nil, "Available"), ("out_of_stock", nil, "Unavailable"),

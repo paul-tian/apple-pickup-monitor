@@ -52,7 +52,10 @@ pub struct App {
     notifier: Notifier,
     health: RwLock<Health>,
     operation: Mutex<()>,
+    credential_operation: Mutex<()>,
     refreshing: AtomicBool,
+    manual_refreshing: AtomicBool,
+    one_shot: AtomicBool,
     log_path: PathBuf,
     pub token: String,
     pub origin: String,
@@ -107,9 +110,16 @@ impl App {
         let products = ProductCatalogs::new(cache_directory);
         let mut notice = None;
         let preferences = db.get::<Preferences>("preferences")?.unwrap_or_default();
-        if !(60..=3600).contains(&preferences.interval_seconds) {
-            return Err("Saved polling interval is invalid; expected 60–3600 seconds.".into());
+        if !(30..=3600).contains(&preferences.interval_seconds) {
+            return Err("Saved polling interval is invalid; expected 30–3600 seconds.".into());
         }
+        // A new client has a fresh HTTP budget. Respect the previous process's
+        // restart boundary (also the legacy cooldown representation), rather
+        // than allowing Refresh now to reset it. Within this process ordinary
+        // scheduled waits and actual cooldowns are tracked separately.
+        let prior = db.get::<u64>("notBefore")?.unwrap_or(0);
+        let cooldown = db.get::<u64>("stockCooldownUntil")?.unwrap_or(0);
+        db.set("stockCooldownUntil", &prior.max(cooldown))?;
         let credential_store = CredentialStore::new(namespace);
         let loader = credential_store.clone();
         let credentials = match tokio::task::spawn_blocking(move || loader.load())
@@ -168,7 +178,10 @@ impl App {
                 ..Default::default()
             }),
             operation: Mutex::new(()),
+            credential_operation: Mutex::new(()),
             refreshing: AtomicBool::new(false),
+            manual_refreshing: AtomicBool::new(false),
+            one_shot: AtomicBool::new(false),
             log_path,
             token,
             origin,
@@ -183,18 +196,28 @@ impl App {
         self.health.write().await.notice = Some(message);
     }
     async fn replace_targets(&self, mut targets: Vec<Target>) -> Result<(), String> {
-        let running = self.watcher.is_running().await;
+        let running = !self.one_shot.load(Ordering::Acquire) && self.watcher.is_running().await;
         self.watcher.stop().await;
+        self.one_shot.store(false, Ordering::Release);
+        self.manual_refreshing.store(false, Ordering::Release);
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         group_nearby_targets(&mut targets, &self.catalog);
         self.db.save_targets(&targets)?;
         self.observations.write().await.reset(&targets, generation);
         self.watcher.set_targets(targets.clone()).await;
         if running && !targets.is_empty() {
-            self.watcher.start().await;
+            self.start_after_reset().await;
         }
         let _ = self.watcher.snapshot().await;
         Ok(())
+    }
+    async fn start_after_reset(&self) {
+        // The upstream cycle snapshot uses millisecond timestamps, whereas
+        // fetch progress carries our generation. Cross a timestamp boundary so
+        // even an immediate cached cooldown/error can finish this new round,
+        // while the strict old-cycle rejection in Observations stays intact.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        self.watcher.start().await;
     }
     fn log(&self, message: &str) {
         use std::io::Write;
@@ -244,6 +267,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/targets", post(add_targets))
         .route("/api/targets/remove", post(remove_target))
         .route("/api/monitor", post(monitor))
+        .route("/api/monitor/refresh", post(refresh_stock))
         .route("/api/settings", put(settings))
         .route("/api/language", put(notification_language))
         .route("/api/credentials", put(credentials))
@@ -301,12 +325,14 @@ async fn protect(State(app): State<Arc<App>>, request: Request, next: Next) -> R
     response
 }
 async fn state(State(app): State<Arc<App>>) -> ApiResult {
-    let running = app.watcher.is_running().await;
+    let one_shot = app.one_shot.load(Ordering::Acquire);
+    let checking = app.watcher.is_running().await;
+    let running = checking && !one_shot;
     let observations = app.observations.read().await;
     let targets:Vec<Value>=app.db.targets()?.iter().map(|target| {
         let s=observations.row(target);
-        let phase=if running { observations.check_phase(target) } else { None };
-        let detail=if matches!(s.availability,Availability::Unknown(UnknownReason::NotYetChecked)) && running {
+        let phase=if checking { observations.check_phase(target) } else { None };
+        let detail=if matches!(s.availability,Availability::Unknown(UnknownReason::NotYetChecked)) && checking {
             match phase {Some("checking")=>"Checking this area with Apple; this includes any request pacing.".into(),_=>"Queued while earlier areas are checked.".into()}
         }else{availability_detail(&s.availability)};
         json!({"key":s.target.key().to_string(),"target":s.target,"availability":s.availability,
@@ -316,9 +342,11 @@ async fn state(State(app): State<Arc<App>>) -> ApiResult {
     let health = app.health.read().await;
     let creds = app.credentials.read().await;
     Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"running":running,"intervalSeconds":prefs.interval_seconds,
+        json!({"version":env!("APPLE_PICKUP_APP_VERSION"),"running":running,"intervalSeconds":prefs.interval_seconds,
             "targets":targets,"notifications":app.db.history()?,"nextCheckAt":if running {health.next_check_at}else{None},
-            "progress":if running {observations.progress.clone()}else{None},
+            "progress":if checking {observations.progress.clone()}else{None},
+            "refreshingStock":app.manual_refreshing.load(Ordering::Acquire),
+            "nextManualCheckAt":manual_check_after(&app)?,
             "nextAllowedStartAt":app.db.get::<u64>("notBefore")?,
             "notificationLanguage":prefs.notification_language,
             "paced":health.paced,"healthy":health.healthy,"notice":health.notice,"catalogRefreshing":app.refreshing.load(Ordering::Relaxed),
@@ -496,6 +524,11 @@ struct Monitor {
 }
 async fn monitor(State(app): State<Arc<App>>, Json(input): Json<Monitor>) -> ApiResult {
     let _guard = app.operation.lock().await;
+    if input.running && app.one_shot.swap(false, Ordering::AcqRel) {
+        // Starting automatic monitoring during a manual round promotes that
+        // same round; it must not start another fetch or stop on completion.
+        return ok();
+    }
     if input.running && !app.watcher.is_running().await {
         if app.db.targets()?.is_empty() {
             return Err(bad("Add a store and product before starting."));
@@ -517,9 +550,11 @@ async fn monitor(State(app): State<Arc<App>>, Json(input): Json<Monitor>) -> Api
             .await
             .reset(&app.db.targets()?, generation);
         app.db.set("notBefore", &(now_ms() + 120_000))?;
-        app.watcher.start().await;
+        app.start_after_reset().await;
     } else if !input.running {
         app.watcher.stop().await;
+        app.one_shot.store(false, Ordering::Release);
+        app.manual_refreshing.store(false, Ordering::Release);
         let generation = app.generation.fetch_add(1, Ordering::AcqRel) + 1;
         app.observations
             .write()
@@ -528,14 +563,66 @@ async fn monitor(State(app): State<Arc<App>>, Json(input): Json<Monitor>) -> Api
     }
     ok()
 }
+
+fn manual_check_after(app: &App) -> Result<u64, String> {
+    Ok(app
+        .db
+        .get::<u64>("manualNotBefore")?
+        .unwrap_or(0)
+        .max(app.db.get::<u64>("stockCooldownUntil")?.unwrap_or(0)))
+}
+
+async fn refresh_stock(State(app): State<Arc<App>>) -> ApiResult {
+    let _guard = app.operation.lock().await;
+    let targets = app.db.targets()?;
+    if targets.is_empty() {
+        return Err(bad("Add a store and product before refreshing."));
+    }
+    if app.manual_refreshing.load(Ordering::Acquire) {
+        // Repeated clicks join the existing manual round, never queue another.
+        return ok();
+    }
+    let running = app.watcher.is_running().await;
+    let next = app.health.read().await.next_check_at;
+    let checking = running
+        && (app.observations.read().await.progress.is_some()
+            || next.is_none_or(|at| at <= now_ms()));
+    if !checking && manual_check_after(&app)? > now_ms() {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Wait for the current request cooldown before refreshing again.".into(),
+        ));
+    }
+    if !checking {
+        app.db.set("notBefore", &(now_ms() + 120_000))?;
+    }
+    app.db.set("manualNotBefore", &(now_ms() + 30_000))?;
+    app.manual_refreshing.store(true, Ordering::Release);
+    if checking {
+        // An automatic round already in flight satisfies the manual request.
+        // Keep its requests, progress, pacing and generation intact.
+        return ok();
+    }
+
+    // The upstream actor has no check-now command. Stop an idle schedule and
+    // restart the same actor/client, keeping its actual HTTP request budget.
+    // Real backoff is persisted separately and was checked above.
+    app.watcher.stop().await;
+    let generation = app.generation.fetch_add(1, Ordering::AcqRel) + 1;
+    app.observations.write().await.reset(&targets, generation);
+    app.health.write().await.next_check_at = None;
+    app.one_shot.store(!running, Ordering::Release);
+    app.start_after_reset().await;
+    ok()
+}
 async fn settings(State(app): State<Arc<App>>, Json(input): Json<Preferences>) -> ApiResult {
     let _guard = app.operation.lock().await;
     if !["en", "zh-Hans", "zh-Hant"].contains(&input.notification_language.as_str()) {
         return Err(bad("Choose a supported notification language."));
     }
-    if !(60..=3600).contains(&input.interval_seconds) {
+    if !(30..=3600).contains(&input.interval_seconds) {
         return Err(bad(
-            "Choose a polling interval between 60 and 3600 seconds.",
+            "Choose a polling interval between 30 and 3600 seconds.",
         ));
     }
     let creds = app.credentials.read().await;
@@ -579,7 +666,9 @@ struct CredentialInput {
     bark_url: Option<String>,
 }
 async fn credentials(State(app): State<Arc<App>>, Json(input): Json<CredentialInput>) -> ApiResult {
-    let _guard = app.operation.lock().await;
+    // Keychain may wait on a user prompt. It must not hold the monitor's
+    // controller lock, which is needed to finish/cancel a one-shot refresh.
+    let _guard = app.credential_operation.lock().await;
     let mut value = app.credentials.read().await.clone();
     for (dest, source) in [
         (&mut value.pushover_token, input.pushover_token),
@@ -736,7 +825,14 @@ async fn consume_events(
             if !app.observations.read().await.accepts_cycle(&snapshot) {
                 continue;
             }
-            let prefs = app.preferences.read().await.clone();
+            let one_shot = app.one_shot.load(Ordering::Acquire);
+            let mut prefs = app.preferences.read().await.clone();
+            if one_shot {
+                // A refresh while paused updates the displayed/confirmed stock
+                // without releasing or creating paused notification jobs.
+                prefs.pushover_enabled = false;
+                prefs.bark_enabled = false;
+            }
             let missing = app.observations.write().await.finish_cycle(&snapshot);
             if let Err(error) = app.db.observe(&missing, &prefs) {
                 app.report(format!("Could not save stock results: {error}"))
@@ -759,8 +855,37 @@ async fn consume_events(
             if let Err(error) = app.db.set("notBefore", &not_before) {
                 app.report(error).await;
             }
+            let rate_limited = snapshot.iter().any(|s| {
+                matches!(
+                    s.availability,
+                    Availability::Unknown(UnknownReason::RateLimited)
+                )
+            });
+            let all_failed =
+                !snapshot.is_empty() && snapshot.iter().all(|s| s.availability.is_failure());
+            let cooldown = if blocked {
+                not_before
+            } else if rate_limited || all_failed {
+                next.max(
+                    app.db
+                        .get::<u64>("stockCooldownUntil")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0),
+                )
+            } else {
+                0
+            };
+            if let Err(error) = app.db.set("stockCooldownUntil", &cooldown) {
+                app.report(error).await;
+            }
+            if one_shot {
+                app.watcher.stop().await;
+                app.one_shot.store(false, Ordering::Release);
+            }
+            app.manual_refreshing.store(false, Ordering::Release);
             let mut health = app.health.write().await;
-            health.next_check_at = Some(next);
+            health.next_check_at = (!one_shot).then_some(next);
             health.paced = paced;
             health.healthy = Some(healthy);
             if !healthy {
@@ -800,7 +925,11 @@ async fn consume_progress(app: &App, event: FetchEvent) {
     if rows.is_empty() {
         return;
     }
-    let prefs = app.preferences.read().await.clone();
+    let mut prefs = app.preferences.read().await.clone();
+    if app.one_shot.load(Ordering::Acquire) {
+        prefs.pushover_enabled = false;
+        prefs.bark_enabled = false;
+    }
     if let Err(error) = app.db.observe(&rows, &prefs) {
         app.report(format!("Could not save stock results: {error}"))
             .await;
@@ -812,8 +941,30 @@ async fn consume_progress(app: &App, event: FetchEvent) {
             Availability::Unknown(UnknownReason::Blocked { .. })
         )
     });
-    if blocked && let Err(e) = app.db.set("notBefore", &(now_ms() + 30 * 60_000)) {
-        app.report(e).await;
+    let rate_limited = rows.iter().any(|s| {
+        matches!(
+            s.availability,
+            Availability::Unknown(UnknownReason::RateLimited)
+        )
+    });
+    if blocked || rate_limited {
+        let until = if blocked {
+            now_ms() + 30 * 60_000
+        } else {
+            now_ms() + prefs.interval_seconds.max(60) * 2_000
+        };
+        for key in ["notBefore", "stockCooldownUntil"] {
+            let until = app
+                .db
+                .get::<u64>(key)
+                .ok()
+                .flatten()
+                .unwrap_or(0)
+                .max(until);
+            if let Err(error) = app.db.set(key, &until) {
+                app.report(error).await;
+            }
+        }
     }
     if failed {
         app.health.write().await.notice = Some(
@@ -837,7 +988,7 @@ async fn deliver_notifications(app: Arc<App>) {
         // Serialize dispatch with removal/pause so committed changes take effect
         // before any subsequent provider request begins.
         let _guard = app.operation.lock().await;
-        if !app.watcher.is_running().await {
+        if app.one_shot.load(Ordering::Acquire) || !app.watcher.is_running().await {
             continue;
         }
         let job = match app.db.next_delivery() {
@@ -914,7 +1065,10 @@ mod tests {
             notifier: Notifier::new().unwrap(),
             health: RwLock::new(Health::default()),
             operation: Mutex::new(()),
+            credential_operation: Mutex::new(()),
             refreshing: AtomicBool::new(false),
+            manual_refreshing: AtomicBool::new(false),
+            one_shot: AtomicBool::new(false),
             log_path: dir.path().join("test.log"),
             token: "test-secret".into(),
             origin: "http://127.0.0.1:8765".into(),
@@ -922,6 +1076,331 @@ mod tests {
         });
         tokio::spawn(consume_events(app.clone(), events, progress_rx));
         (app, dir)
+    }
+
+    #[derive(Clone)]
+    struct ManualFetcher {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        permits: Arc<tokio::sync::Semaphore>,
+        failure: &'static str,
+    }
+    impl ManualFetcher {
+        fn new(failure: &'static str) -> Self {
+            Self {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                permits: Arc::new(tokio::sync::Semaphore::new(0)),
+                failure,
+            }
+        }
+        async fn result(
+            &self,
+            store: &str,
+            parts: &[String],
+        ) -> Result<apw_core::apple::StoreAvailability, apw_core::apple::ApiError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.permits.acquire().await.unwrap().forget();
+            match self.failure {
+                "blocked" => return Err(apw_core::apple::ApiError::Blocked("fixture".into())),
+                "rate_limited" => {
+                    return Err(apw_core::apple::ApiError::RateLimited("fixture".into()));
+                }
+                "transport" => return Err(apw_core::apple::ApiError::Transport("fixture".into())),
+                _ => {}
+            }
+            Ok(apw_core::apple::StoreAvailability {
+                store_number: store.into(),
+                store_name: store.into(),
+                parts: parts
+                    .iter()
+                    .map(|part| {
+                        (
+                            part.clone(),
+                            apw_core::apple::PartStatus {
+                                part_number: part.clone(),
+                                availability: Availability::InStock,
+                                product_title: None,
+                                pickup_display: "available".into(),
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+        }
+    }
+    impl apw_core::apple::Fetcher for ManualFetcher {
+        async fn pickup_message(
+            &self,
+            _region: &'static apw_core::model::Region,
+            store: &str,
+            parts: &[String],
+        ) -> Result<apw_core::apple::StoreAvailability, apw_core::apple::ApiError> {
+            self.result(store, parts).await
+        }
+        async fn pickup_message_nearby(
+            &self,
+            _region: &'static apw_core::model::Region,
+            _location: &str,
+            parts: &[String],
+        ) -> Result<Vec<apw_core::apple::StoreAvailability>, apw_core::apple::ApiError> {
+            self.result("R238", parts).await.map(|store| vec![store])
+        }
+    }
+    fn manual_target() -> Target {
+        Target {
+            locale: "en_AU".into(),
+            store_number: "R238".into(),
+            store_title: "Sydney".into(),
+            part_number: "SKU".into(),
+            product_name: "Test phone".into(),
+            companion_part: None,
+            pickup_location: None,
+        }
+    }
+    async fn api(app: &Arc<App>, method: &str, path: &str, payload: Value) -> (StatusCode, Value) {
+        request(
+            app.clone(),
+            method,
+            path,
+            payload,
+            Some("test-secret"),
+            None,
+        )
+        .await
+    }
+    async fn wait_for_manual_end(app: &Arc<App>) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while app.manual_refreshing.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("manual refresh did not finish");
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_from_pause_is_one_round_and_has_a_30_second_floor() {
+        let fetcher = ManualFetcher::new("");
+        let (app, _dir) = test_app_with_fetcher(fetcher.clone()).await;
+        app.replace_targets(vec![manual_target()]).await.unwrap();
+        app.preferences.write().await.pushover_enabled = true;
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::OK
+        );
+        let (_, state) = api(&app, "GET", "/api/state", Value::Null).await;
+        assert_eq!(state["running"], false);
+        assert_eq!(state["refreshingStock"], true);
+        assert!(state["nextManualCheckAt"].as_u64().unwrap() > now_ms());
+        // Repeated requests join the same blocked fetch rather than cancelling
+        // it or queueing another round.
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::OK
+        );
+        fetcher.permits.add_permits(1);
+        wait_for_manual_end(&app).await;
+        assert_eq!(fetcher.calls.load(Ordering::Acquire), 1);
+        assert!(!app.watcher.is_running().await);
+        let (_, state) = api(&app, "GET", "/api/state", Value::Null).await;
+        assert_eq!(state["running"], false);
+        assert_eq!(state["refreshingStock"], false);
+        assert_eq!(state["targets"][0]["availability"]["kind"], "in_stock");
+        assert!(state["targets"][0]["lastCheckedMs"].as_u64().is_some());
+        assert!(
+            app.db.history().unwrap().is_empty(),
+            "Paused manual checks created notification jobs"
+        );
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_advances_running_schedule_and_coalesces_active_rounds() {
+        let fetcher = ManualFetcher::new("");
+        let (app, _dir) = test_app_with_fetcher(fetcher.clone()).await;
+        app.replace_targets(vec![manual_target()]).await.unwrap();
+        assert_eq!(
+            api(&app, "PUT", "/api/settings", json!({"intervalSeconds":300}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            api(&app, "POST", "/api/monitor", json!({"running":true}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let generation = app.generation.load(Ordering::Acquire);
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.generation.load(Ordering::Acquire),
+            generation,
+            "Joining an active round restarted it"
+        );
+        fetcher.permits.add_permits(1);
+        wait_for_manual_end(&app).await;
+        assert!(app.watcher.is_running().await);
+        assert_eq!(fetcher.calls.load(Ordering::Acquire), 1);
+        assert!(app.health.read().await.next_check_at.unwrap() > now_ms() + 120_000);
+        // Advance only the 30s manual gate; the configured 300s wait remains.
+        app.db.set("manualNotBefore", &0_u64).unwrap();
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::OK
+        );
+        fetcher.permits.add_permits(1);
+        wait_for_manual_end(&app).await;
+        assert_eq!(fetcher.calls.load(Ordering::Acquire), 2);
+        assert!(app.watcher.is_running().await);
+        assert_eq!(app.preferences.read().await.interval_seconds, 300);
+        assert_eq!(
+            api(&app, "GET", "/api/state", Value::Null).await.1["running"],
+            true
+        );
+        app.watcher.stop().await;
+    }
+
+    #[tokio::test]
+    async fn instant_manual_failure_finishes_and_cannot_bypass_real_cooldowns() {
+        for failure in ["blocked", "rate_limited", "transport"] {
+            let fetcher = ManualFetcher::new(failure);
+            // Complete without an artificial network delay: this covers the
+            // upstream client's immediate cached cooldown/error response.
+            fetcher.permits.add_permits(1);
+            let (app, _dir) = test_app_with_fetcher(fetcher.clone()).await;
+            app.replace_targets(vec![manual_target()]).await.unwrap();
+            assert_eq!(
+                api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+                StatusCode::OK
+            );
+            wait_for_manual_end(&app).await;
+            assert!(!app.watcher.is_running().await);
+            app.db.set("manualNotBefore", &0_u64).unwrap();
+            assert!(app.db.get::<u64>("stockCooldownUntil").unwrap().unwrap() > now_ms());
+            assert_eq!(
+                api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            assert_eq!(fetcher.calls.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn keychain_wait_cannot_hold_up_one_shot_completion() {
+        let fetcher = ManualFetcher::new("");
+        fetcher.permits.add_permits(1);
+        let (app, _dir) = test_app_with_fetcher(fetcher.clone()).await;
+        app.replace_targets(vec![manual_target()]).await.unwrap();
+        let _credential_save = app.credential_operation.lock().await;
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::OK
+        );
+        wait_for_manual_end(&app).await;
+        assert!(!app.watcher.is_running().await);
+        assert_eq!(fetcher.calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_does_not_release_previously_paused_notifications() {
+        let fetcher = ManualFetcher::new("");
+        let (app, _dir) = test_app_with_fetcher(fetcher.clone()).await;
+        let target = manual_target();
+        app.replace_targets(vec![target.clone()]).await.unwrap();
+        let mut prefs = app.preferences.read().await.clone();
+        prefs.pushover_enabled = true;
+        *app.preferences.write().await = prefs.clone();
+        app.db
+            .observe(
+                &[apw_core::watcher::TargetState {
+                    target,
+                    availability: Availability::InStock,
+                    last_checked_ms: Some(now_ms()),
+                    consecutive_failures: 0,
+                }],
+                &prefs,
+            )
+            .unwrap();
+        assert_eq!(app.db.history().unwrap()[0].status, "pending");
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::OK
+        );
+        let deliveries = tokio::spawn(deliver_notifications(app.clone()));
+        // An incorrect raw-watcher-running gate would attempt the job and
+        // record a credential error. The empty fake credentials cannot send a
+        // real notification even if this regression is reintroduced.
+        tokio::time::sleep(Duration::from_millis(2_100)).await;
+        assert_eq!(app.db.history().unwrap()[0].status, "pending");
+        deliveries.abort();
+        fetcher.permits.add_permits(1);
+        wait_for_manual_end(&app).await;
+    }
+
+    #[tokio::test]
+    async fn pause_cancels_manual_round_without_late_results() {
+        let fetcher = ManualFetcher::new("");
+        let (app, _dir) = test_app_with_fetcher(fetcher.clone()).await;
+        app.replace_targets(vec![manual_target()]).await.unwrap();
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            api(&app, "POST", "/api/monitor", json!({"running":false}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        fetcher.permits.add_permits(1);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!app.watcher.is_running().await);
+        assert!(!app.manual_refreshing.load(Ordering::Acquire));
+        assert!(!app.one_shot.load(Ordering::Acquire));
+        assert!(
+            app.observations
+                .read()
+                .await
+                .row(&manual_target())
+                .last_checked_ms
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn polling_interval_accepts_30_and_rejects_29_seconds() {
+        let (app, _dir) = test_app().await;
+        assert_eq!(app.preferences.read().await.interval_seconds, 30);
+        assert_eq!(
+            api(&app, "PUT", "/api/settings", json!({"intervalSeconds":30}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            api(&app, "PUT", "/api/settings", json!({"intervalSeconds":29}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            app.db
+                .get::<Preferences>("preferences")
+                .unwrap()
+                .unwrap()
+                .interval_seconds,
+            30
+        );
+        assert_eq!(
+            api(&app, "POST", "/api/monitor/refresh", json!({})).await.0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[derive(Clone)]
@@ -1603,7 +2082,7 @@ mod tests {
             .0,
             StatusCode::BAD_REQUEST
         );
-        assert_eq!(app.preferences.read().await.interval_seconds, 60);
+        assert_eq!(app.preferences.read().await.interval_seconds, 30);
         assert!(!app.preferences.read().await.pushover_enabled);
         assert_eq!(
             request(

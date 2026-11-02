@@ -10,6 +10,28 @@ import time
 lock = threading.Lock()
 directory = Path(sys.argv[sys.argv.index("--data-dir") + 1])
 
+startup_mode = directory / "startup-failure-mode"
+if startup_mode.exists():
+    mode = startup_mode.read_text()
+    os.close(0)
+    (directory / "stdin-closed").touch()
+    if mode == "broken-input":
+        time.sleep(0.04)  # Parent sees EPIPE before the startup frame arrives.
+    sys.stderr.write("fake-secret-only-in-stderr\n")
+    sys.stderr.flush()
+    frame = (json.dumps({"id": 0, "status": 409, "body": {
+        "code": "unknown_failure" if mode == "unknown" else "instance_in_use",
+        "error": "fake-secret-never-display-this-text",
+    }}) + "\n").encode()
+    if mode == "split":
+        for byte in frame:
+            sys.stdout.buffer.write(bytes([byte]))
+            sys.stdout.buffer.flush()
+    else:
+        sys.stdout.buffer.write(frame)
+        sys.stdout.buffer.flush()
+    sys.exit(1)
+
 def reply(request, status=200, body=None, split=False):
     wire = (json.dumps({"id": request["id"], "status": status, "body": body}, ensure_ascii=False) + "\n").encode()
     with lock:

@@ -16,6 +16,8 @@
   let catalogLoaded = false;
   let catalogLoading = false;
   let monitorBusy = false;
+  let stockRefreshBusy = false;
+  let serviceConnected = false;
   let lastRowsSignature = '';
   let lastNotificationsSignature = '';
   let toastTimer;
@@ -133,15 +135,38 @@
   }
 
   function updateConnectionStatus(connected) {
+    serviceConnected = connected;
     const element = $('#monitor-status');
     if (!connected) {
       element.className = 'status-pill warning';
       element.innerHTML = '<span class="status-dot"></span>Disconnected';
       $('#monitor-toggle').disabled = true;
+      renderRefreshButton();
       return;
     }
-    element.className = `status-pill ${state?.running ? 'positive' : 'neutral'}`;
-    element.innerHTML = `<span class="status-dot"></span>${state?.running ? 'Monitoring' : 'Paused'}`;
+    const active = state?.running || state?.refreshingStock;
+    element.className = `status-pill ${active ? 'positive' : 'neutral'}`;
+    element.innerHTML = `<span class="status-dot"></span>${state?.refreshingStock && !state?.running ? 'Refreshing' : state?.running ? 'Monitoring' : 'Paused'}`;
+    renderRefreshButton();
+  }
+
+  function canRefreshStock() {
+    return serviceConnected && !stopped && state?.targets?.length > 0 &&
+      !monitorBusy && !stockRefreshBusy && !state.refreshingStock && !state.progress &&
+      !(state.running && !state.nextCheckAt) && Number(state.nextManualCheckAt || 0) <= Date.now();
+  }
+
+  function renderRefreshButton() {
+    const button = $('#refresh-stock');
+    const refreshing = stockRefreshBusy || state?.refreshingStock;
+    const cooldown = Math.max(0, Math.ceil((Number(state?.nextManualCheckAt || 0) - Date.now()) / 1000));
+    button.disabled = !canRefreshStock();
+    button.innerHTML = `${icon('refresh')}<span>${refreshing ? 'Refreshing…' : 'Refresh now'}</span>`;
+    button.setAttribute('aria-busy', String(Boolean(refreshing)));
+    button.title = refreshing || state?.progress || (state?.running && !state?.nextCheckAt)
+      ? 'A stock check is already in progress.'
+      : cooldown ? `Available in ${cooldown} seconds. Apple’s request cooldowns still apply.`
+      : 'Fetch current stock once. Monitoring stays paused if it is paused now.';
   }
 
   function renderClock() {
@@ -149,13 +174,14 @@
     const next = $('#next-check');
     const detail = $('#next-check-detail');
     const label = next.closest('.summary-card')?.querySelector('.summary-label');
-    const progress = state.running ? state.progress : null;
+    const checking = state.running || state.refreshingStock;
+    const progress = checking ? state.progress : null;
     if (label) label.textContent = progress && !stopped ? 'Current round' : 'Next check';
     next.style.fontSize = '';
-    if (stopped) {
+    if (stopped || !serviceConnected) {
       next.textContent = '—';
       detail.textContent = 'Service disconnected';
-    } else if (!state.running) {
+    } else if (!checking) {
       next.textContent = 'Paused';
       next.style.fontSize = '24px';
       detail.textContent = state.targets?.length ? 'Start when you’re ready' : 'Add a monitoring target to get started';
@@ -175,8 +201,11 @@
       const seconds = state.nextCheckAt ? Math.max(0, Math.ceil((Number(state.nextCheckAt) - Date.now()) / 1000)) : 0;
       next.style.fontSize = seconds ? '' : '22px';
       next.textContent = seconds ? (seconds >= 60 ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`) : 'Checking…';
-      detail.textContent = state.paced ? 'Next round is paced to respect Apple’s request limits' : `Minimum interval: ${state.intervalSeconds || 60} seconds`;
+      detail.textContent = state.refreshingStock && !state.running
+        ? 'Fetching current stock once, then returning to paused.'
+        : state.paced ? 'Next round is paced to respect Apple’s request limits' : `Minimum interval: ${state.intervalSeconds || 30} seconds`;
     }
+    renderRefreshButton();
     $$('[data-checked-at]').forEach((element) => { element.textContent = relativeTime(element.dataset.checkedAt); });
   }
 
@@ -192,18 +221,19 @@
     $('#available-count').textContent = available;
     $('#available-detail').textContent = targets.length ? (available ? `${available} match${available === 1 ? '' : 'es'} on your monitoring list` : unknown ? `${unknown} target${unknown === 1 ? '' : 's'} awaiting confirmation` : 'We’ll let you know when that changes') : 'Waiting for your first check';
     $('#app-version').textContent = state.version ? `v${state.version}` : 'Prototype';
-    updateConnectionStatus(true);
+    updateConnectionStatus(serviceConnected);
     const button = $('#monitor-toggle');
-    button.disabled = (!targets.length && !state.running) || monitorBusy;
-    button.innerHTML = `${icon(state.running ? 'pause' : 'play')}<span>${state.running ? 'Pause monitoring' : 'Start monitoring'}</span>`;
-    button.setAttribute('aria-pressed', String(Boolean(state.running)));
+    const active = state.running || state.refreshingStock;
+    button.disabled = !serviceConnected || stopped || (!targets.length && !active) || monitorBusy || stockRefreshBusy;
+    button.innerHTML = `${icon(active ? 'pause' : 'play')}<span>${state.refreshingStock && !state.running ? 'Stop refresh' : state.running ? 'Pause monitoring' : 'Start monitoring'}</span>`;
+    button.setAttribute('aria-pressed', String(Boolean(active)));
     $('#watch-empty').hidden = targets.length > 0;
     $('#watch-table-wrap').hidden = !targets.length;
     showMessage($('#health-banner'), state.notice || (state.healthy === false && state.running ? 'Some checks could not confirm availability. Unknown results are not the same as unavailable stock.' : ''));
     const rows = targets.map((entry) => {
       const target = entry.target || {};
       const availability = availabilityLabel(entry.availability);
-      if (unknownReason(entry.availability) === 'not_yet_checked' && state.running) {
+      if (unknownReason(entry.availability) === 'not_yet_checked' && active) {
         if (entry.checkPhase === 'checking') availability.label = 'Checking';
         else if (entry.checkPhase === 'queued') availability.label = 'Queued';
       }
@@ -251,6 +281,7 @@
     polling = true;
     try {
       state = await api('/api/state');
+      serviceConnected = true;
       showMessage($('#connection-banner'), '');
       renderState();
     } catch (error) {
@@ -313,7 +344,7 @@
 
   function openSettings() {
     const settings = state?.settings || {};
-    $('#interval-input').value = state?.intervalSeconds || 60;
+    $('#interval-input').value = state?.intervalSeconds || 30;
     $('#pushover-enabled').checked = Boolean(settings.pushoverEnabled);
     $('#bark-enabled').checked = Boolean(settings.barkEnabled);
     $('#pushover-configured').textContent = settings.pushoverConfigured ? 'Saved' : '';
@@ -396,9 +427,10 @@
   });
 
   $('#monitor-toggle').addEventListener('click', async () => {
-    if (!state || monitorBusy) return;
-    const running = !state.running;
+    if (!state || monitorBusy || stockRefreshBusy || !serviceConnected || stopped) return;
+    const running = !(state.running || state.refreshingStock);
     monitorBusy = true;
+    renderRefreshButton();
     $('#monitor-toggle').disabled = true;
     $('#monitor-toggle').setAttribute('aria-busy', 'true');
     try { await send('/api/monitor', { running }); await poll(); }
@@ -406,6 +438,25 @@
     finally {
       monitorBusy = false;
       $('#monitor-toggle').removeAttribute('aria-busy');
+      if (state && !stopped) renderState();
+    }
+  });
+
+  $('#refresh-stock').addEventListener('click', async () => {
+    if (!canRefreshStock()) return;
+    stockRefreshBusy = true;
+    renderState();
+    try {
+      await send('/api/monitor/refresh');
+      // Keep the control busy until a fresh state confirms completion, even if
+      // another state poll is already in flight when this request succeeds.
+      state.refreshingStock = true;
+      await poll();
+    } catch (error) {
+      toast(error.message, true);
+      await poll();
+    } finally {
+      stockRefreshBusy = false;
       if (state && !stopped) renderState();
     }
   });
@@ -433,8 +484,8 @@
     if (pushoverUser) credentials.pushoverUser = pushoverUser;
     if (barkUrl) credentials.barkUrl = barkUrl;
     const settings = { intervalSeconds: Number($('#interval-input').value), pushoverEnabled: $('#pushover-enabled').checked, barkEnabled: $('#bark-enabled').checked };
-    if (!Number.isInteger(settings.intervalSeconds) || settings.intervalSeconds < 60 || settings.intervalSeconds > 3600) {
-      showMessage(message, 'Choose an interval between 60 and 3,600 seconds.'); return;
+    if (!Number.isInteger(settings.intervalSeconds) || settings.intervalSeconds < 30 || settings.intervalSeconds > 3600) {
+      showMessage(message, 'Choose an interval between 30 and 3,600 seconds.'); return;
     }
     if (settings.pushoverEnabled && !state?.settings?.pushoverConfigured && (!pushoverToken || !pushoverUser)) {
       showMessage(message, 'Enter both your Pushover application token and user key to enable Pushover.'); return;

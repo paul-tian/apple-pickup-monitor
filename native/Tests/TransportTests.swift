@@ -9,6 +9,63 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 @main
 struct TransportTests {
     @MainActor
+    static func testStartupFailures(helper: URL, root: URL) async throws {
+        let directory = root.appendingPathComponent("startup-failures", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let engine = EngineTransport(dataDirectory: directory, helperURL: helper)
+        var failures: [EngineTransportError] = []
+        engine.onUnexpectedExit = { failures.append($0) }
+        let marker = directory.appendingPathComponent("startup-failure-mode")
+        let closedInput = directory.appendingPathComponent("stdin-closed")
+        let expected = "Another copy of Apple Pickup Monitor is using this monitoring data. Quit that copy to continue."
+        for mode in ["immediate", "split", "broken-input", "unknown"] {
+            try? FileManager.default.removeItem(at: closedInput)
+            try mode.write(to: marker, atomically: true, encoding: .utf8)
+            let previousFailures = failures.count
+            try engine.start()
+            if mode == "broken-input" {
+                let deadline = Date().addingTimeInterval(3)
+                while Date() < deadline && !FileManager.default.fileExists(atPath: closedInput.path) {
+                    try await Task.sleep(nanoseconds: 1_000_000)
+                }
+                try expect(FileManager.default.fileExists(atPath: closedInput.path), "Fake engine did not close stdin")
+            }
+            do {
+                _ = try await engine.request(path: "/api/echo", timeout: 3)
+                throw TransportTestFailure(message: "Startup refusal was accepted")
+            } catch EngineTransportError.instanceInUse {
+                try expect(mode != "unknown", "Unrecognized startup code became a trusted message")
+            } catch EngineTransportError.invalidResponse {
+                try expect(mode == "unknown", "Known startup refusal lost its precise cause")
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+            try expect(failures.count == previousFailures + 1, "Startup refusal produced duplicate callbacks")
+            let message = failures.last?.localizedDescription ?? ""
+            try expect(!message.contains("fake-secret"), "Startup failure exposed helper diagnostics")
+            if mode != "unknown" { try expect(message == expected, "Startup callback lost the instance-in-use message") }
+            await engine.stop()
+
+            try FileManager.default.removeItem(at: marker)
+            try engine.start()
+            let response = try await engine.request(path: "/api/echo", method: "POST", body: ["recovered": true])
+            let object = try JSONSerialization.jsonObject(with: response) as! [String: Any]
+            try expect(object["recovered"] as? Bool == true, "Restart retained an earlier startup failure")
+            await engine.stop()
+            try expect(failures.count == previousFailures + 1, "Successful restart reported a stale startup cause")
+        }
+        // The old shared log still contains startup stderr. It must not supply
+        // a cause for an unrelated later crash from a different engine run.
+        try engine.start()
+        do {
+            _ = try await engine.request(path: "/api/crash", timeout: 3)
+            throw TransportTestFailure(message: "Unrelated crash was accepted")
+        } catch EngineTransportError.failed(let message) {
+            try expect(message == "The monitoring engine stopped unexpectedly.", "Crash reused stale startup diagnostics")
+        }
+        await engine.stop()
+    }
+
+    @MainActor
     static func main() async {
         do {
             if CommandLine.arguments[1] == "--abrupt-parent" {
@@ -21,9 +78,10 @@ struct TransportTests {
             }
             let helper = URL(fileURLWithPath: CommandLine.arguments[1])
             let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+            try await testStartupFailures(helper: helper, root: root)
             let engine = EngineTransport(dataDirectory: root, helperURL: helper)
             var unexpectedExits = 0
-            engine.onUnexpectedExit = { unexpectedExits += 1 }
+            engine.onUnexpectedExit = { _ in unexpectedExits += 1 }
             try engine.start()
             try expect(engine.isRunning, "Engine did not start")
 
@@ -109,7 +167,7 @@ struct TransportTests {
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
             try expect(FileManager.default.fileExists(atPath: marker), "Engine retained stdin after abrupt app exit")
-            print("Native pipe transport tests passed: UTF-8 framing, IDs, errors, timeout, cancellation, limits, EOF, blocked writes, parent exit and recovery.")
+            print("Native pipe transport tests passed: startup refusal, UTF-8 framing, IDs, errors, timeout, cancellation, limits, EOF, blocked writes, parent exit and recovery.")
         } catch let failure as TransportTestFailure {
             fputs("Native pipe transport test failed: \(failure.message)\n", stderr)
             exit(1)

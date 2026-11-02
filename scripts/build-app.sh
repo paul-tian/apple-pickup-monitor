@@ -13,10 +13,12 @@ case "${APPLE_PICKUP_TARGET:-$(uname -m)}" in
   x86_64|x86_64-apple-darwin) BUILD_ARCH=x86_64 ;;
   *) printf '%s\n' 'APPLE_PICKUP_TARGET must be a macOS Rust target.' >&2; exit 1 ;;
 esac
-APP_VERSION="${APP_VERSION:-0.4.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-1}"
-if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ ! "$BUILD_NUMBER" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
-  printf '%s\n' 'APP_VERSION must be three numeric components; BUILD_NUMBER must have one to three.' >&2
+if [[ -n "${APP_VERSION:-}" && ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf '%s\n' 'APP_VERSION must be three numeric components.' >&2
+  exit 1
+fi
+if [[ -n "${BUILD_NUMBER:-}" && ! "$BUILD_NUMBER" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+  printf '%s\n' 'BUILD_NUMBER must have one to three numeric components.' >&2
   exit 1
 fi
 
@@ -26,9 +28,12 @@ mkdir -p "$CLANG_MODULE_CACHE_PATH"
 XCODE_SETTINGS=(
   "ARCHS=$BUILD_ARCH" ONLY_ACTIVE_ARCH=YES
   "CLANG_MODULE_CACHE_PATH=$CLANG_MODULE_CACHE_PATH" "MODULE_CACHE_DIR=$CLANG_MODULE_CACHE_PATH"
-  "MARKETING_VERSION=$APP_VERSION" "CURRENT_PROJECT_VERSION=$BUILD_NUMBER"
   ENABLE_HARDENED_RUNTIME=YES
 )
+# Xcode owns the app version/build number. Only override values explicitly
+# supplied by the caller; the helper phase compiles the same marketing version.
+if [[ -n "${APP_VERSION:-}" ]]; then XCODE_SETTINGS+=("MARKETING_VERSION=$APP_VERSION"); fi
+if [[ -n "${BUILD_NUMBER:-}" ]]; then XCODE_SETTINGS+=("CURRENT_PROJECT_VERSION=$BUILD_NUMBER"); fi
 # Honor the project's signing identity unless an explicit override is supplied.
 # Silently replacing a certificate signature with ad-hoc signing breaks
 # Keychain recognition whenever the helper is rebuilt.
@@ -47,6 +52,14 @@ BUILT_APP="$DERIVED_DATA/Build/Products/Release/Apple Pickup Monitor.app"
 if [[ ! -x "$BUILT_APP/Contents/MacOS/ApplePickupMonitor" || ! -x "$BUILT_APP/Contents/Helpers/apple-pickup-monitor" ]]; then
   printf '%s\n' 'Xcode did not produce both the native app and its bundled monitoring helper.' >&2
   exit 1
+fi
+APP_VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$BUILT_APP/Contents/Info.plist")"
+if [[ "$BUILD_ARCH" == "$(uname -m)" ]]; then
+  ENGINE_VERSION="$("$BUILT_APP/Contents/Helpers/apple-pickup-monitor" --version)"
+  if [[ "$ENGINE_VERSION" != "$APP_VERSION" ]]; then
+    printf 'App version %s does not match bundled engine version %s. Rebuild the helper before packaging.\n' "$APP_VERSION" "$ENGINE_VERSION" >&2
+    exit 1
+  fi
 fi
 
 # The bundle must run without Homebrew, Cargo or other developer libraries.
@@ -84,4 +97,4 @@ fi
 FINAL_APP="$PROJECT_ROOT/dist/Apple Pickup Monitor.app"
 rm -rf "$FINAL_APP"
 mv "$APP" "$FINAL_APP"
-printf 'Native app: %s\nArchitecture: %s\n' "$FINAL_APP" "$BUILD_ARCH"
+printf 'Native app: %s\nVersion: %s\nArchitecture: %s\n' "$FINAL_APP" "$APP_VERSION" "$BUILD_ARCH"

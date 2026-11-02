@@ -8,6 +8,8 @@
 "Add %d monitoring targets" = "添加 %d 项监控";
 "Add a configuration and one or more stores above." = "在上方添加产品配置及一个或多个门店。";
 "Add monitoring targets" = "添加监控";
+"Expanded" = "已展开";
+"Collapsed" = "已折叠";
 "Alerts and test notifications will appear here." = "库存提醒和测试通知会显示在这里。";
 "Apple Pickup Monitor" = "Apple 到店取货监控";
 "Apple Store" = "Apple 门店";
@@ -53,7 +55,7 @@
 "Leave blank to keep saved keys." = "留空以保留已保存的密钥。";
 "Loading regional catalogue…" = "正在加载地区产品目录…";
 "Mac" = "Mac";
-"Minimum 60 seconds.\nActual checks respect Apple's request limits." = "最短为 60 秒。\n实际检查会遵循 Apple 的请求频率限制。";
+"Minimum 30 seconds.\nActual checks respect Apple's request limits." = "最短为 30 秒。\n实际检查会遵循 Apple 的请求频率限制。";
 "Model" = "机型";
 "Monitoring" = "监控中";
 "Monitoring %d targets" = "正在监控 %d 项";
@@ -141,7 +143,7 @@
 "Each region supports 20 distinct part numbers, including any required Apple Watch bands. Remove some products first." = "每个地区最多支持 20 个不同的部件编号（包括所需的 Apple Watch 表带），请先移除部分产品。";
 "Add a store and product before starting." = "请先添加门店和产品，再开始监控。";
 "Choose a supported notification language." = "请选择支持的通知语言。";
-"Choose a polling interval between 60 and 3600 seconds." = "请选择 60 到 3600 秒之间的检查间隔。";
+"Choose a polling interval between 30 and 3600 seconds." = "请选择 30 到 3600 秒之间的检查间隔。";
 "Save both Pushover keys before enabling Pushover." = "请先保存 Pushover 的两个密钥，再启用 Pushover。";
 "Save a Bark URL before enabling Bark." = "请先保存 Bark 推送地址，再启用 Bark。";
 "Select Pushover or Bark." = "请选择 Pushover 或 Bark。";
@@ -149,7 +151,7 @@
 "This notification channel is disabled." = "此通知渠道已关闭。";
 "The catalogue was refreshed recently. Allow five minutes between refreshes." = "最近已刷新产品目录，请间隔五分钟后再刷新。";
 "Product catalogue refreshed." = "产品目录已刷新。";
-"Saved polling interval is invalid; expected 60–3600 seconds." = "已保存的检查间隔无效，必须在 60–3600 秒之间。";
+"Saved polling interval is invalid; expected 30–3600 seconds." = "已保存的检查间隔无效，必须在 30–3600 秒之间。";
 "Monitoring target removed before delivery" = "监控项已在通知发送前移除";
 "Monitoring target is no longer eligible for this alert" = "此监控项已不再符合该提醒的发送条件";
 "Starting monitoring engine…" = "正在启动监控引擎…";
@@ -167,5 +169,26 @@
 "Bundled monitoring engine version does not match this app. Rebuild or reinstall the app." = "内置监控引擎的版本与应用不匹配，请重新构建或安装应用。";
 "The monitoring engine stopped unexpectedly. Restarting automatically." = "监控引擎意外停止，正在自动重启。";
 "The monitoring engine stopped unexpectedly." = "监控引擎意外停止。";
+"Another copy of Apple Pickup Monitor is using this monitoring data. Quit that copy to continue." = "另一个 Apple Pickup Monitor 实例正在使用这些监控数据。请退出该实例以继续。";
 "The monitoring engine stopped accepting requests." = "监控引擎已停止接收请求。";
 "The monitoring engine stopped unexpectedly. Quit and reopen the app." = "监控引擎意外停止，请退出并重新打开应用。";
+
+"Refresh now" = "立即刷新";
+
+"Refreshing…" = "正在刷新…";
+
+"Refreshing stock…" = "正在刷新库存…";
+
+"Stop refresh" = "停止刷新";
+
+"Stock refresh requested." = "已请求刷新库存。";
+
+"Add a store and product before refreshing." = "请先添加门店和商品，再刷新库存。";
+
+"A stock check is already in progress." = "库存检查正在进行中。";
+
+"Refresh available in %d seconds." = "%d 秒后可以再次刷新。";
+
+"Fetch current availability once. Apple request pacing still applies. (⇧⌘R)" = "立即查询一次库存，仍遵循 Apple 的请求频率限制。(⇧⌘R)";
+
+"Wait for the current request cooldown before refreshing again." = "请等待当前请求冷却结束后再刷新。";

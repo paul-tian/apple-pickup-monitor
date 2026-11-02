@@ -15,8 +15,10 @@ struct MonitorState: Decodable {
     var progress: RoundProgress?
     var nextAllowedStartAt: Double?
     var notificationLanguage: String? = nil
+    var refreshingStock: Bool? = nil
+    var nextManualCheckAt: Double? = nil
 
-    static let empty = MonitorState(version: "", running: false, intervalSeconds: 60,
+    static let empty = MonitorState(version: "", running: false, intervalSeconds: 30,
         nextCheckAt: nil, paced: false, healthy: nil, notice: nil, catalogRefreshing: false,
         targets: [], notifications: [], settings: .empty, progress: nil, nextAllowedStartAt: nil)
 }

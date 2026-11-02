@@ -28,10 +28,30 @@ done
 # Check the whole architecture set before compiling even the first helper.
 pickup_require_rust_targets "$PROJECT_ROOT" "${RUST_TARGETS[@]}"
 pickup_resolve_cmake "$PROJECT_ROOT"
+if [[ ! "${MARKETING_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf '%s\n' 'Set the Xcode app Version (MARKETING_VERSION) to three numeric components, for example 0.5.0.' >&2
+  exit 1
+fi
+# build.rs tracks this input, so changing the Xcode version recompiles the
+# helper even when all Rust sources are unchanged.
+export APPLE_PICKUP_APP_VERSION="$MARKETING_VERSION"
+case "$(uname -m)" in
+  arm64) NATIVE_RUST_TARGET=aarch64-apple-darwin ;;
+  x86_64) NATIVE_RUST_TARGET=x86_64-apple-darwin ;;
+  *) NATIVE_RUST_TARGET="" ;;
+esac
 BINARIES=()
 for rust_target in "${RUST_TARGETS[@]}"; do
   "$PICKUP_CARGO" build --release --locked --bin apple-pickup-monitor --target "$rust_target"
   binary="$BUILD_ROOT/$rust_target/release/apple-pickup-monitor"
+  # Cross-builds must not require Rosetta just to verify their version.
+  if [[ "$rust_target" == "$NATIVE_RUST_TARGET" ]]; then
+    engine_version="$("$binary" --version)"
+    if [[ "$engine_version" != "$MARKETING_VERSION" ]]; then
+      printf 'Built engine version %s does not match Xcode version %s.\n' "$engine_version" "$MARKETING_VERSION" >&2
+      exit 1
+    fi
+  fi
   while IFS= read -r library; do
     case "$library" in
       /System/Library/*|/usr/lib/*) ;;
